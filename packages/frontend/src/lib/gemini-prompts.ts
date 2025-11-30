@@ -40,37 +40,32 @@ export interface SelfVerificationReport {
  * @returns A formatted goal-oriented prompt
  */
 export function buildGoalOrientedPrompt(prompt: string, successCriteria: string[]): string {
-  const criteriaList = successCriteria.map((c, i) => `${i + 1}. [ ] ${c}`).join('\n');
+  const criteriaList = successCriteria.map((c, i) => `${i + 1}. ${c}`).join('\n');
 
   return `${prompt}
 
-SUCCESS CRITERIA (verify each):
+GOALS (complete ALL before stopping):
 ${criteriaList}
 
-INSTRUCTIONS:
-- Plan all operations before starting
-- Execute one operation at a time
-- After each operation, verify the observable state
-- Report any validation warnings immediately
-- After completing all operations, provide a self-verification report
+EXECUTION:
+- Work continuously until ALL goals are achieved
+- Use compound skills for efficiency (skill_create_house_shell, etc.)
+- A project without rooms is NOT complete - keep building
+- Only pause for: blocking errors or design trade-offs needing user input
 
-AT COMPLETION provide:
-\`\`\`
-SELF-VERIFICATION REPORT
-Requirements Met: [YES/NO/PARTIAL]
-Validation Status: [PASSED/FAILED/WARNINGS]
-Confidence: [HIGH/MEDIUM/LOW]
-Recommendation: [Proceed/Revise/Request Clarification]
-\`\`\``;
+WHEN FINISHED: Briefly summarize what was created.`;
 }
 
 /**
  * Default success criteria for CAD generation when none are specified
  */
 export const DEFAULT_SUCCESS_CRITERIA = [
-  'All requested entities created successfully',
+  'House shell created (project + building + level + footprint)',
+  'At least one living area (living room or great room)',
+  'At least one bedroom',
+  'At least one bathroom',
+  'Kitchen included',
   'No validation errors',
-  'Geometry is valid',
 ];
 
 // ============================================================================

@@ -23,14 +23,15 @@ async function testCADGeneration() {
   console.log('-'.repeat(40));
 
   const simplePrompt = {
-    prompt: 'Create a simple project called "Test House" with imperial units and US IRC 2021 code. Add a building called "Main House" and create one level called "Ground Floor" at elevation 0 with 9 foot floor-to-floor height.',
+    prompt: 'Design a simple 2-bedroom house called "Test House" with imperial units. Include a living room and kitchen.',
     successCriteria: [
-      'Project created successfully',
-      'Building added to project',
-      'Level created with correct elevation',
+      'House shell created (project + building + level + footprint)',
+      'At least one living area (living room or great room)',
+      'At least one bedroom',
+      'Kitchen included',
     ],
     useMock: true, // Use mock executor for testing
-    maxIterations: 10,
+    maxIterations: 15,
   };
 
   try {

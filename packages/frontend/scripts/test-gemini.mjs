@@ -31,7 +31,7 @@ async function testGemini() {
     console.log('Test 2: Function calling');
     const toolResponse = await ai.models.generateContent({
       model: 'gemini-3-pro-preview',
-      contents: 'Create a project called "Test House" with imperial units.',
+      contents: 'Design a simple 2-bedroom house called "Test House" with imperial units.',
       config: {
         tools: [
           {

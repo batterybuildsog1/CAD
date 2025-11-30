@@ -31,6 +31,7 @@ import {
 } from '@google/genai';
 import { CAD_SYSTEM_PROMPT, CAD_FUNCTION_DECLARATIONS } from '@/lib/gemini-cad';
 import { SKILL_FUNCTION_DECLARATIONS } from '@/lib/cad-skills';
+import { getServerLogger, getSessionIdFromHeaders, generateRequestId } from '@/lib/logger/server';
 
 // ============================================================================
 // Request/Response Types
@@ -88,9 +89,19 @@ const ALL_FUNCTION_DECLARATIONS: FunctionDeclaration[] = [
 // ============================================================================
 
 export async function POST(request: NextRequest): Promise<NextResponse<ChatResponse>> {
+  const logger = getServerLogger();
+  const sessionId = getSessionIdFromHeaders(request.headers);
+  const requestId = generateRequestId();
+  const startTime = performance.now();
+
+  logger.setRequestId(requestId);
+  logger.logRequest('POST', '/api/ai/chat', sessionId, { requestId });
+
   // Validate API key is configured
   const apiKey = process.env.GOOGLE_API_KEY;
   if (!apiKey) {
+    logger.error('gemini', 'api_key_missing', 'GOOGLE_API_KEY not configured', sessionId);
+    logger.setRequestId(null);
     return NextResponse.json(
       {
         success: false,
@@ -105,6 +116,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
   try {
     body = await request.json();
   } catch {
+    logger.error('api', 'parse_error', 'Invalid JSON in request body', sessionId);
+    logger.setRequestId(null);
     return NextResponse.json(
       {
         success: false,
@@ -116,6 +129,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
 
   // Validate message
   if (!body.message) {
+    logger.error('api', 'validation_error', 'Missing message field', sessionId);
+    logger.setRequestId(null);
     return NextResponse.json(
       {
         success: false,
@@ -124,6 +139,20 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
       { status: 400 }
     );
   }
+
+  // Log request details
+  const isInitialPrompt = typeof body.message === 'string';
+  logger.logGeminiRequest(
+    isInitialPrompt ? 'prompt' : 'function_response',
+    sessionId,
+    {
+      historyLength: body.history?.length || 0,
+      messageType: isInitialPrompt ? 'string' : 'function_responses',
+      messagePreview: isInitialPrompt
+        ? (body.message as string).substring(0, 100)
+        : `${(body.message as FunctionResponsePart[]).length} function responses`,
+    }
+  );
 
   try {
     // Create Gemini client
@@ -219,24 +248,54 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
       });
     }
 
+    const durationMs = performance.now() - startTime;
+    const usage = usageMetadata ? {
+      promptTokens: usageMetadata.promptTokenCount ?? 0,
+      responseTokens: usageMetadata.candidatesTokenCount ?? 0,
+      totalTokens: usageMetadata.totalTokenCount ?? 0,
+    } : undefined;
+
+    logger.logGeminiResponse(
+      isInitialPrompt ? 'prompt' : 'function_response',
+      sessionId,
+      durationMs,
+      true,
+      {
+        functionCallCount: functionCalls.length,
+        hasText: !!response.text,
+        hasThinking: !!thinkingSummary,
+        tokenUsage: usage,
+      }
+    );
+    logger.logResponse('POST', '/api/ai/chat', 200, sessionId, durationMs);
+    logger.setRequestId(null);
+
     return NextResponse.json({
       success: true,
       text: response.text || undefined,
       functionCalls: functionCalls.length > 0 ? functionCalls : undefined,
       history: updatedHistory,
       thinking: thinkingSummary,
-      usage: usageMetadata ? {
-        promptTokens: usageMetadata.promptTokenCount ?? 0,
-        responseTokens: usageMetadata.candidatesTokenCount ?? 0,
-        totalTokens: usageMetadata.totalTokenCount ?? 0,
-      } : undefined,
+      usage,
     });
   } catch (error) {
-    console.error('[API] Chat error:', error);
-
+    const durationMs = performance.now() - startTime;
     const errorMessage = error instanceof Error
       ? error.message
       : 'Unknown chat error';
+
+    logger.logGeminiResponse(
+      isInitialPrompt ? 'prompt' : 'function_response',
+      sessionId,
+      durationMs,
+      false,
+      { error: errorMessage },
+      error instanceof Error ? error : undefined
+    );
+    logger.logResponse('POST', '/api/ai/chat', 500, sessionId, durationMs);
+    logger.setRequestId(null);
+
+    console.error('[API] Chat error:', error);
 
     return NextResponse.json(
       {

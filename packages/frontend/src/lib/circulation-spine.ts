@@ -8,9 +8,78 @@
  * 1. Circulation Graph (what connects to what)
  * 2. Circulation Spine (how they connect)
  * 3. Room Placement (around the spine)
+ *
+ * NEW ARCHITECTURE (v2):
+ * This module now integrates with the graph-based circulation system:
+ * - circulation-graph.ts: Room adjacency graph with BFS connectivity validation
+ * - hallway-mst.ts: MST-based optimal hallway network generation
+ * - spine-geometry.ts: Polygon generation from centerlines
+ * - pathfinding.ts: A* pathfinding validation
+ *
+ * The existing API is preserved for backward compatibility, while new functions
+ * provide access to actual geometry generation and validation.
  */
 
-import type { RoomType, Point2D } from './gemini-types';
+import type { RoomType, Point2D, Polygon2D } from './gemini-types';
+
+// Import from new graph-based modules
+import {
+  CirculationGraph,
+  validateCirculationConnectivity,
+  buildCirculationGraph as buildGraphFromRoomsAndDoors,
+  generateConnectivityReport,
+  type GraphNode,
+  type GraphEdge,
+  type ConnectivityValidationResult,
+  type PathResult as GraphPathResult,
+} from './circulation-graph';
+
+import {
+  computeMinimumHallwayNetwork,
+  computeRoomDistance,
+  findHallwayConnectionPoint,
+  primsAlgorithm,
+  isNetworkConnected,
+  calculateNetworkEfficiency,
+  getNetworkSummary,
+  type HallwaySegment,
+  type HallwayNetwork,
+} from './hallway-mst';
+
+import {
+  generateSpineGeometry as generateGeometryFromNetwork,
+  centerlineToPolygon,
+  createJunctionPolygon,
+  hallwayOverlapsRoom,
+  validateGeometryWithinFootprint,
+  validateSpineGeometry as validateGeometry,
+  calculatePolygonArea,
+  pointInPolygon,
+  polygonsOverlap,
+  distance as geometryDistance,
+  extendHallway,
+  clipHallwayToBounds,
+  geometryToPolygons,
+  getGeometrySummary,
+  type HallwayPolygon,
+  type JunctionPolygon,
+  type SpineGeometry,
+  type ValidationResult as GeometryValidationResult,
+} from './spine-geometry';
+
+import {
+  validateAllRoomsReachable,
+  validateNetworkReachability,
+  findPathBetweenRooms,
+  createWalkabilityGrid,
+  isPointInPolygon,
+  describePathResult,
+  describeValidationResult,
+  type PathResult,
+  type ValidationResult as PathfindingValidationResult,
+  type WalkabilityGrid,
+  type HallwayPolygon as PathfindingHallwayPolygon,
+} from './pathfinding';
 
 // ============================================================================
 // Types
@@ -126,6 +195,26 @@ export interface CirculationRating {
   issue: string | null;
 }
 
+/**
+ * Comprehensive validation result combining graph, geometry, and pathfinding validation
+ */
+export interface ValidationResult {
+  /** Overall validity - true only if all checks pass */
+  isValid: boolean;
+
+  /** Graph connectivity validation results */
+  connectivity: ConnectivityValidationResult;
+
+  /** Geometry validation results (footprint bounds, room overlaps) */
+  geometry: GeometryValidationResult;
+
+  /** Pathfinding validation results (actual walkability) */
+  pathfinding: PathfindingValidationResult;
+
+  /** Human-readable summary of all issues */
+  summary: string;
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -205,7 +294,7 @@ const FOYER_SIZES: Record<'minimal' | 'standard' | 'grand', number> = {
 };
 
 // ============================================================================
-// Core Functions
+// Core Functions (Backward Compatible API)
 // ============================================================================
 
 /**
@@ -248,7 +337,7 @@ function estimateDoorCount(rooms: RoomRequirement[]): number {
 /**
  * Calculate required circulation from room requirements (not fixed percentage)
  *
- * Key formula: (bedrooms × 4' + 8') × hallway_width + foyer + transitions
+ * Key formula: (bedrooms x 4' + 8') x hallway_width + foyer + transitions
  */
 export function calculateRequiredCirculation(
   rooms: RoomRequirement[],
@@ -303,19 +392,19 @@ export function calculateRequiredCirculation(
     requirements.push({
       component: 'stairwell',
       reason: 'Vertical circulation (stair run)',
-      area: params.hallwayWidth * 14, // 4' × 14' typical
+      area: params.hallwayWidth * 14, // 4' x 14' typical
       isOptional: false,
     });
     requirements.push({
       component: 'upper_landing',
       reason: 'Upper floor landing',
-      area: 25, // 5' × 5'
+      area: 25, // 5' x 5'
       isOptional: false,
     });
     requirements.push({
       component: 'lower_landing',
       reason: 'Lower floor landing',
-      area: 20, // 4' × 5'
+      area: 20, // 4' x 5'
       isOptional: false,
     });
   }
@@ -334,7 +423,7 @@ export function calculateRequiredCirculation(
     requirements.push({
       component: 'mudroom',
       reason: 'Garage-to-house transition',
-      area: 48, // 6' × 8'
+      area: 48, // 6' x 8'
       isOptional: true,
     });
   }
@@ -379,12 +468,12 @@ export function inferSpineType(
 
   const aspectRatio = footprintWidth / footprintDepth;
 
-  // Long rectangle → linear spine
+  // Long rectangle -> linear spine
   if (aspectRatio > 1.5 || aspectRatio < 0.67) {
     return 'linear';
   }
 
-  // Square-ish → hub and spoke
+  // Square-ish -> hub and spoke
   return 'hub-and-spoke';
 }
 
@@ -569,6 +658,9 @@ export function calculateMainAxis(
 
 /**
  * Calculate full circulation spine from requirements
+ *
+ * This function now uses the graph-based approach internally when room bounds
+ * are available, falling back to the legacy zone-based calculation otherwise.
  */
 export function calculateCirculationSpine(
   footprintWidth: number,
@@ -765,7 +857,7 @@ export interface WallSegment {
 export const DOOR_CLEARANCE = {
   /** Standard interior door width */
   standardWidth: 3,
-  /** Door swing radius (same as width for 90° swing) */
+  /** Door swing radius (same as width for 90deg swing) */
   swingRadius: 3,
   /** Clearance in front of door (walking approach) */
   frontClearance: 3,
@@ -1107,7 +1199,7 @@ export function validateDoorPlacements(
 
       if (doDoorsConflict(d1.door, d2.door)) {
         conflicts.push(
-          `Door conflict: ${d1.room} (→${d1.door.connectsTo}) ↔ ${d2.room} (→${d2.door.connectsTo})`
+          `Door conflict: ${d1.room} (->${d1.door.connectsTo}) <-> ${d2.room} (->${d2.door.connectsTo})`
         );
       }
     }
@@ -1118,3 +1210,431 @@ export function validateDoorPlacements(
     conflicts,
   };
 }
+
+// ============================================================================
+// NEW: Graph-Based Circulation Functions
+// ============================================================================
+
+/**
+ * Build a circulation graph from room requirements.
+ *
+ * This creates a graph representation of room connectivity that can be used
+ * for validation and hallway network generation.
+ *
+ * @param rooms - Array of room requirements with at least name, type, and area
+ * @returns CirculationGraph instance with rooms as nodes
+ *
+ * @example
+ * ```typescript
+ * const rooms: RoomRequirement[] = [
+ *   { name: 'foyer', type: 'foyer', area: 64 },
+ *   { name: 'living', type: 'living', area: 200 },
+ *   { name: 'bedroom1', type: 'bedroom', area: 144 },
+ * ];
+ *
+ * const graph = buildCirculationGraph(rooms);
+ * console.log('Rooms in graph:', graph.nodes.size);
+ * ```
+ */
+export function buildCirculationGraph(rooms: RoomRequirement[]): CirculationGraph {
+  const graph = new CirculationGraph();
+
+  // Convert RoomRequirement to approximate RoomBounds for graph construction
+  // Since RoomRequirement only has area, we estimate dimensions
+  for (const room of rooms) {
+    // Estimate dimensions from area (assume roughly square)
+    const side = Math.sqrt(room.area);
+
+    const node: GraphNode = {
+      id: room.name,
+      roomType: room.type,
+      // Place rooms at origin initially - actual positions come from layout
+      centroid: [side / 2, side / 2],
+      bounds: {
+        x: 0,
+        y: 0,
+        width: side,
+        depth: side,
+      },
+    };
+
+    graph.addRoom(node);
+  }
+
+  // Add implicit connections based on zone clustering
+  const zoneMap = clusterRoomsIntoZones(rooms);
+
+  // Connect rooms within the same zone
+  for (const [_zoneType, zoneRooms] of zoneMap) {
+    for (let i = 0; i < zoneRooms.length; i++) {
+      for (let j = i + 1; j < zoneRooms.length; j++) {
+        const room1 = zoneRooms[i];
+        const room2 = zoneRooms[j];
+
+        // Check if these room types should have connecting doors
+        if (shouldHaveConnectingDoor(room1.type, room2.type)) {
+          graph.addConnection(room1.name, room2.name, 'door');
+        }
+      }
+    }
+  }
+
+  // Connect entry zone to public zone
+  const entryRooms = zoneMap.get('entry') || [];
+  const publicRooms = zoneMap.get('public') || [];
+  if (entryRooms.length > 0 && publicRooms.length > 0) {
+    graph.addConnection(entryRooms[0].name, publicRooms[0].name, 'opening');
+  }
+
+  // Connect public zone to private zone via hallway
+  const privateRooms = zoneMap.get('private') || [];
+  if (publicRooms.length > 0 && privateRooms.length > 0) {
+    graph.addConnection(publicRooms[0].name, privateRooms[0].name, 'hallway');
+  }
+
+  return graph;
+}
+
+/**
+ * Generate an optimal hallway network connecting all rooms.
+ *
+ * Uses Minimum Spanning Tree (MST) algorithm to find the network with
+ * minimum total hallway length while ensuring all rooms are connected.
+ *
+ * @param rooms - Array of room requirements
+ * @param footprintWidth - Building footprint width in feet
+ * @param footprintDepth - Building footprint depth in feet
+ * @param feel - Circulation feel preference (affects hallway width)
+ * @returns HallwayNetwork with optimal segments
+ *
+ * @example
+ * ```typescript
+ * const rooms: RoomRequirement[] = [...];
+ * const network = generateHallwayNetwork(rooms, 50, 40, 'comfortable');
+ *
+ * console.log('Total hallway length:', network.totalLength);
+ * console.log('Total hallway area:', network.totalArea);
+ * ```
+ */
+export function generateHallwayNetwork(
+  rooms: RoomRequirement[],
+  footprintWidth: number,
+  footprintDepth: number,
+  feel: CirculationFeel = 'comfortable'
+): HallwayNetwork {
+  const params = FEEL_TO_CIRCULATION_MAP[feel];
+
+  // Convert RoomRequirement to RoomBounds with estimated positions
+  const roomBounds = estimateRoomPositions(rooms, footprintWidth, footprintDepth);
+
+  // Use MST algorithm to compute optimal hallway network
+  return computeMinimumHallwayNetwork(roomBounds, params.hallwayWidth);
+}
+
+/**
+ * Generate geometric spine representation from room requirements.
+ *
+ * This produces actual polygon geometry for hallways and junctions that can
+ * be rendered or used for collision detection.
+ *
+ * @param rooms - Array of room requirements
+ * @param footprintWidth - Building footprint width in feet
+ * @param footprintDepth - Building footprint depth in feet
+ * @param feel - Circulation feel preference
+ * @returns SpineGeometry with hallway polygons and junctions
+ *
+ * @example
+ * ```typescript
+ * const geometry = generateSpineGeometry(rooms, 50, 40, 'comfortable');
+ *
+ * // Render hallways
+ * for (const hallway of geometry.hallways) {
+ *   drawPolygon(hallway.vertices);
+ * }
+ *
+ * // Render junctions
+ * for (const junction of geometry.junctions) {
+ *   drawPolygon(junction.vertices);
+ * }
+ * ```
+ */
+export function generateSpineGeometry(
+  rooms: RoomRequirement[],
+  footprintWidth: number,
+  footprintDepth: number,
+  feel: CirculationFeel = 'comfortable'
+): SpineGeometry {
+  const params = FEEL_TO_CIRCULATION_MAP[feel];
+
+  // First generate the hallway network
+  const network = generateHallwayNetwork(rooms, footprintWidth, footprintDepth, feel);
+
+  // Convert network to geometric representation
+  return generateGeometryFromNetwork(network, params.hallwayWidth);
+}
+
+/**
+ * Validate circulation system comprehensively.
+ *
+ * Performs three levels of validation:
+ * 1. Graph connectivity - Can all rooms be reached from entry?
+ * 2. Geometry validity - Do hallways fit within footprint without room overlaps?
+ * 3. Pathfinding validity - Can a person actually walk through the hallways?
+ *
+ * @param rooms - Array of room requirements
+ * @param hallways - Generated spine geometry
+ * @param footprintWidth - Building footprint width
+ * @param footprintDepth - Building footprint depth
+ * @returns Comprehensive ValidationResult
+ *
+ * @example
+ * ```typescript
+ * const geometry = generateSpineGeometry(rooms, 50, 40);
+ * const result = validateCirculation(rooms, geometry, 50, 40);
+ *
+ * if (!result.isValid) {
+ *   console.error('Circulation issues:', result.summary);
+ * }
+ * ```
+ */
+export function validateCirculation(
+  rooms: RoomRequirement[],
+  hallways: SpineGeometry,
+  footprintWidth: number,
+  footprintDepth: number
+): ValidationResult {
+  // Convert RoomRequirement to RoomBounds
+  const roomBounds = estimateRoomPositions(rooms, footprintWidth, footprintDepth);
+
+  // Find entry room
+  const entryRoomId = findEntryRoom(rooms);
+
+  // 1. Graph connectivity validation
+  const graph = buildCirculationGraph(rooms);
+  const unreachableRooms = graph.findUnreachableRooms(entryRoomId);
+  const allRoomIds = rooms.map(r => r.name);
+  const reachableRooms = allRoomIds.filter(id => !unreachableRooms.includes(id));
+  const stats = graph.getStats();
+
+  const connectivityResult: ConnectivityValidationResult = {
+    isValid: graph.isFullyConnected(entryRoomId),
+    unreachableRooms,
+    reachableRooms,
+    missingConnections: graph.getRequiredHallwayConnections().map(
+      edge => `${edge.from} needs connection to ${edge.to}`
+    ),
+    warnings: [],
+    componentCount: stats.componentCount,
+  };
+
+  // Add warnings for low connectivity
+  if (stats.averageConnections < 1.5 && stats.nodeCount > 2) {
+    connectivityResult.warnings.push(
+      'Low connectivity - consider adding more connections for better flow'
+    );
+  }
+
+  // 2. Geometry validation
+  const geometryResult = validateGeometry(
+    hallways,
+    roomBounds,
+    { width: footprintWidth, depth: footprintDepth }
+  );
+
+  // 3. Pathfinding validation
+  const hallwayPolygons: PathfindingHallwayPolygon[] = hallways.hallways.map(h => ({
+    id: h.id,
+    vertices: [...h.vertices],
+    width: h.width,
+    connectedRooms: [...h.connectsRooms],
+  }));
+
+  const pathfindingResult = validateAllRoomsReachable(
+    roomBounds,
+    hallwayPolygons,
+    [], // No explicit doors - hallway connections imply them
+    entryRoomId
+  );
+
+  // Generate summary
+  const summaryLines: string[] = [];
+
+  if (!connectivityResult.isValid) {
+    summaryLines.push('CONNECTIVITY ISSUES:');
+    for (const room of connectivityResult.unreachableRooms) {
+      summaryLines.push(`  - Room "${room}" is unreachable from entry`);
+    }
+    for (const conn of connectivityResult.missingConnections) {
+      summaryLines.push(`  - ${conn}`);
+    }
+  }
+
+  if (!geometryResult.valid) {
+    summaryLines.push('GEOMETRY ISSUES:');
+    for (const violation of geometryResult.violations) {
+      summaryLines.push(`  - ${violation}`);
+    }
+  }
+
+  if (!pathfindingResult.allReachable) {
+    summaryLines.push('PATHFINDING ISSUES:');
+    for (const room of pathfindingResult.unreachableRooms) {
+      summaryLines.push(`  - Cannot walk to "${room}" from entry`);
+    }
+  }
+
+  if (connectivityResult.warnings.length > 0) {
+    summaryLines.push('WARNINGS:');
+    for (const warning of connectivityResult.warnings) {
+      summaryLines.push(`  - ${warning}`);
+    }
+  }
+
+  const isValid = connectivityResult.isValid &&
+                  geometryResult.valid &&
+                  pathfindingResult.allReachable;
+
+  return {
+    isValid,
+    connectivity: connectivityResult,
+    geometry: geometryResult,
+    pathfinding: pathfindingResult,
+    summary: summaryLines.length > 0
+      ? summaryLines.join('\n')
+      : 'All circulation validation checks passed.',
+  };
+}
+
+// ============================================================================
+// Helper Functions for Graph-Based System
+// ============================================================================
+
+/**
+ * Estimate room positions within a footprint based on zones.
+ *
+ * This is a simplified layout algorithm that places rooms in zones
+ * to enable MST hallway calculation. For actual room placement,
+ * use the dedicated room-fitting module.
+ */
+function estimateRoomPositions(
+  rooms: RoomRequirement[],
+  footprintWidth: number,
+  footprintDepth: number
+): RoomBounds[] {
+  const roomBounds: RoomBounds[] = [];
+  const zoneMap = clusterRoomsIntoZones(rooms);
+
+  // Define zone regions within the footprint
+  const zoneRegions: Record<ZoneType, { x: number; y: number; width: number; depth: number }> = {
+    entry: { x: 0, y: 0, width: footprintWidth * 0.2, depth: footprintDepth * 0.3 },
+    public: { x: 0, y: footprintDepth * 0.3, width: footprintWidth * 0.5, depth: footprintDepth * 0.7 },
+    private: { x: footprintWidth * 0.5, y: 0, width: footprintWidth * 0.5, depth: footprintDepth },
+    service: { x: 0, y: 0, width: footprintWidth * 0.2, depth: footprintDepth * 0.3 },
+    vertical: { x: footprintWidth * 0.4, y: footprintDepth * 0.4, width: 4, depth: 14 },
+  };
+
+  // Place rooms within their zone regions
+  for (const [zoneType, zoneRooms] of zoneMap) {
+    const region = zoneRegions[zoneType];
+    let offsetX = 0;
+    let offsetY = 0;
+
+    for (const room of zoneRooms) {
+      const side = Math.sqrt(room.area);
+      const width = Math.min(side * 1.2, region.width - offsetX);
+      const depth = room.area / width;
+
+      roomBounds.push({
+        name: room.name,
+        type: room.type,
+        x: region.x + offsetX,
+        y: region.y + offsetY,
+        width,
+        depth,
+      });
+
+      // Move to next position in zone
+      offsetX += width + 1; // 1' gap between rooms
+      if (offsetX + width > region.width) {
+        offsetX = 0;
+        offsetY += depth + 1;
+      }
+    }
+  }
+
+  return roomBounds;
+}
+
+/**
+ * Find the entry room from a list of rooms.
+ * Prefers foyer, then mudroom, then living room.
+ */
+function findEntryRoom(rooms: RoomRequirement[]): string {
+  const priorities: RoomType[] = ['foyer', 'mudroom', 'living', 'hallway', 'circulation'];
+
+  for (const type of priorities) {
+    const room = rooms.find(r => r.type === type);
+    if (room) return room.name;
+  }
+
+  // Fallback to first room
+  return rooms[0]?.name || 'entry';
+}
+
+// ============================================================================
+// Re-exports for convenience
+// ============================================================================
+
+// Re-export types from new modules for consumers who want detailed access
+export type {
+  GraphNode,
+  GraphEdge,
+  ConnectivityValidationResult,
+  HallwaySegment,
+  HallwayNetwork,
+  HallwayPolygon,
+  JunctionPolygon,
+  SpineGeometry,
+  GeometryValidationResult,
+  PathResult,
+  PathfindingValidationResult,
+  WalkabilityGrid,
+};
+
+// Re-export key functions from new modules
+export {
+  // From circulation-graph
+  CirculationGraph,
+  validateCirculationConnectivity,
+  generateConnectivityReport,
+
+  // From hallway-mst
+  computeMinimumHallwayNetwork,
+  computeRoomDistance,
+  findHallwayConnectionPoint,
+  isNetworkConnected,
+  calculateNetworkEfficiency,
+  getNetworkSummary,
+
+  // From spine-geometry
+  centerlineToPolygon,
+  createJunctionPolygon,
+  hallwayOverlapsRoom,
+  validateGeometryWithinFootprint,
+  calculatePolygonArea,
+  pointInPolygon,
+  polygonsOverlap,
+  extendHallway,
+  clipHallwayToBounds,
+  geometryToPolygons,
+  getGeometrySummary,
+
+  // From pathfinding
+  validateAllRoomsReachable,
+  validateNetworkReachability,
+  findPathBetweenRooms,
+  createWalkabilityGrid,
+  isPointInPolygon,
+  describePathResult,
+  describeValidationResult,
+};

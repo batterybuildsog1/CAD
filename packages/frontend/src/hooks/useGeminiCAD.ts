@@ -24,6 +24,7 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { Content } from '@google/genai';
+import { getClientLogger, generateRequestId, getSessionHeaders } from '@/lib/logger';
 import type {
   ObservableToolResult,
   GenerationResult,
@@ -454,17 +455,26 @@ export function useGeminiCAD(): UseGeminiCADResult {
   // Initialize WASM store on mount
   useEffect(() => {
     let mounted = true;
+    const logger = getClientLogger();
+    const startTime = performance.now();
+
+    logger.info('wasm', 'init_start', 'Initializing WASM store');
 
     getWasmStore()
       .then((s) => {
         if (mounted) {
+          const durationMs = performance.now() - startTime;
+          logger.info('wasm', 'init_success', 'WASM store initialized', { durationMs });
           setStore(s);
           setWasmLoading(false);
         }
       })
       .catch((e) => {
         if (mounted) {
-          setError(e instanceof Error ? e.message : 'Failed to load WASM');
+          const durationMs = performance.now() - startTime;
+          const errorMsg = e instanceof Error ? e.message : 'Failed to load WASM';
+          logger.error('wasm', 'init_failed', 'WASM initialization failed', e instanceof Error ? e : undefined, { durationMs });
+          setError(errorMsg);
           setWasmLoading(false);
         }
       });
@@ -477,9 +487,15 @@ export function useGeminiCAD(): UseGeminiCADResult {
   // Execute a single tool call locally via WASM
   const executeToolCall = useCallback(
     (toolCall: ToolCall): ObservableToolResult => {
+      const logger = getClientLogger();
+      const startTime = performance.now();
+
       if (!store) {
+        logger.error('tool', 'execute_failed', `Tool ${toolCall.name} failed: WASM store not initialized`);
         return buildErrorResult(toolCall, 'WASM store not initialized', llmStateRef.current, null);
       }
+
+      logger.debug('tool', 'execute_start', `Executing tool: ${toolCall.name}`, { args: toolCall.args });
 
       // Handle skill calls
       if (toolCall.name.startsWith('skill_')) {
@@ -577,13 +593,25 @@ export function useGeminiCAD(): UseGeminiCADResult {
       // Regular tool call
       const handler = toolHandlers[toolCall.name];
       if (!handler) {
+        logger.error('tool', 'execute_failed', `Tool not supported: ${toolCall.name}`);
         return buildErrorResult(toolCall, `Tool not supported: ${toolCall.name}`, llmStateRef.current, store);
       }
 
       const execResult = handler(store, toolCall.args);
+      const durationMs = performance.now() - startTime;
+
       if (!execResult.success) {
+        logger.error('tool', 'execute_failed', `Tool ${toolCall.name} failed: ${execResult.error}`, undefined, {
+          args: toolCall.args,
+          durationMs,
+        });
         return buildErrorResult(toolCall, execResult.error || 'Unknown error', llmStateRef.current, store);
       }
+
+      logger.info('tool', 'execute_success', `Tool ${toolCall.name} completed`, {
+        result: execResult.data,
+        durationMs,
+      });
 
       // Track level IDs for rendering ONLY when footprint is set
       // This ensures render_level() won't fail with "Footprint not found"
@@ -612,6 +640,15 @@ export function useGeminiCAD(): UseGeminiCADResult {
   // Generate CAD from prompt
   const generate = useCallback(
     async (prompt: string, successCriteria?: string[]): Promise<GenerationResult> => {
+      const logger = getClientLogger();
+      const requestId = logger.startRequest();
+      const genStartTime = performance.now();
+
+      logger.info('gemini', 'generation_start', 'Starting CAD generation', {
+        prompt: prompt.substring(0, 200) + (prompt.length > 200 ? '...' : ''),
+        successCriteria,
+      });
+
       if (!store) {
         const errorResult: GenerationResult = {
           success: false,
@@ -619,6 +656,8 @@ export function useGeminiCAD(): UseGeminiCADResult {
           toolCallHistory: [],
           checkpointReports: [],
         };
+        logger.error('gemini', 'generation_failed', 'WASM store not initialized');
+        logger.endRequest();
         setError('WASM store not initialized');
         return errorResult;
       }
@@ -823,6 +862,16 @@ export function useGeminiCAD(): UseGeminiCADResult {
           },
         };
 
+        const genDurationMs = performance.now() - genStartTime;
+        logger.info('gemini', 'generation_complete', 'CAD generation completed', {
+          success: generationResult.success,
+          toolCallCount: toolCallHistoryRef.current.length,
+          tokenUsage: tokenUsageRef.current.cumulative,
+          iterations: currentIteration,
+          durationMs: genDurationMs,
+        });
+        logger.endRequest();
+
         setResult(generationResult);
         setGenerating(false);
         return generationResult;
@@ -830,6 +879,8 @@ export function useGeminiCAD(): UseGeminiCADResult {
         // Check if this was a cancellation
         if (err instanceof Error && err.name === 'AbortError') {
           // Cancellation is not an error - just return partial results
+          logger.info('gemini', 'generation_cancelled', 'Generation cancelled by user');
+          logger.endRequest();
           const cancelledResult: GenerationResult = {
             success: false,
             finalResponse: 'Generation cancelled by user',
@@ -842,6 +893,13 @@ export function useGeminiCAD(): UseGeminiCADResult {
         }
 
         const errorMessage = err instanceof Error ? err.message : String(err);
+        const genDurationMs = performance.now() - genStartTime;
+        logger.error('gemini', 'generation_failed', `Generation failed: ${errorMessage}`,
+          err instanceof Error ? err : undefined,
+          { durationMs: genDurationMs, iterations: currentIteration }
+        );
+        logger.endRequest();
+
         const errorResult: GenerationResult = {
           success: false,
           finalResponse: `Generation failed: ${errorMessage}`,
@@ -1164,7 +1222,10 @@ async function callGeminiProxy(
 ): Promise<ChatResponse> {
   const response = await fetch('/api/ai/chat', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...getSessionHeaders(),
+    },
     body: JSON.stringify({ message, history }),
   });
 
