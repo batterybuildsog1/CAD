@@ -738,3 +738,383 @@ export function getCirculationFeelDescription(feel: CirculationFeel): string {
       return 'Generous layout with 48" hallways and larger entry. Feels open and airy but uses more space for circulation.';
   }
 }
+
+// ============================================================================
+// Door Placement Algorithm
+// ============================================================================
+
+/** Room bounds for door placement calculations */
+export interface RoomBounds {
+  name: string;
+  type: RoomType;
+  x: number;
+  y: number;
+  width: number;
+  depth: number;
+}
+
+/** Wall segment representation */
+export interface WallSegment {
+  start: Point2D;
+  end: Point2D;
+  length: number;
+  direction: 'north' | 'south' | 'east' | 'west';
+}
+
+/** Door clearance requirements */
+export const DOOR_CLEARANCE = {
+  /** Standard interior door width */
+  standardWidth: 3,
+  /** Door swing radius (same as width for 90° swing) */
+  swingRadius: 3,
+  /** Clearance in front of door (walking approach) */
+  frontClearance: 3,
+  /** Minimum distance from wall corner */
+  cornerDistance: 1.5,
+  /** Pocket door clearance (no swing) */
+  pocketClearance: 0.5,
+};
+
+/**
+ * Determine if two room types should have a connecting door
+ */
+export function shouldHaveConnectingDoor(
+  type1: RoomType,
+  type2: RoomType
+): boolean {
+  // Rooms that share internal doors
+  const connectingPairs: Array<[RoomType, RoomType]> = [
+    // Primary suite connections
+    ['bedroom', 'bathroom'],
+    ['bedroom', 'closet'],
+    ['bathroom', 'closet'],
+
+    // Kitchen connections
+    ['kitchen', 'pantry'],
+    ['kitchen', 'dining'],
+
+    // Living space connections (open floor plan usually - no door)
+    // ['living', 'dining'], // Usually open
+
+    // Entry connections
+    ['foyer', 'closet'],
+    ['mudroom', 'laundry'],
+
+    // Utility connections
+    ['garage', 'mudroom'],
+    ['garage', 'laundry'],
+    ['laundry', 'utility'],
+  ];
+
+  for (const [t1, t2] of connectingPairs) {
+    if ((type1 === t1 && type2 === t2) || (type1 === t2 && type2 === t1)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Get the walls of a room
+ */
+export function getRoomWalls(room: RoomBounds): WallSegment[] {
+  const { x, y, width, depth } = room;
+
+  return [
+    // North wall
+    {
+      start: [x, y + depth] as Point2D,
+      end: [x + width, y + depth] as Point2D,
+      length: width,
+      direction: 'north' as const,
+    },
+    // South wall
+    {
+      start: [x, y] as Point2D,
+      end: [x + width, y] as Point2D,
+      length: width,
+      direction: 'south' as const,
+    },
+    // East wall
+    {
+      start: [x + width, y] as Point2D,
+      end: [x + width, y + depth] as Point2D,
+      length: depth,
+      direction: 'east' as const,
+    },
+    // West wall
+    {
+      start: [x, y] as Point2D,
+      end: [x, y + depth] as Point2D,
+      length: depth,
+      direction: 'west' as const,
+    },
+  ];
+}
+
+/**
+ * Find the wall of room1 that is closest to room2's center
+ */
+export function findNearestWall(
+  room: RoomBounds,
+  targetCenter: Point2D
+): WallSegment {
+  const walls = getRoomWalls(room);
+  let nearestWall = walls[0];
+  let minDistance = Infinity;
+
+  for (const wall of walls) {
+    // Calculate midpoint of wall
+    const midX = (wall.start[0] + wall.end[0]) / 2;
+    const midY = (wall.start[1] + wall.end[1]) / 2;
+
+    // Distance from wall midpoint to target
+    const dist = Math.sqrt(
+      (midX - targetCenter[0]) ** 2 + (midY - targetCenter[1]) ** 2
+    );
+
+    if (dist < minDistance) {
+      minDistance = dist;
+      nearestWall = wall;
+    }
+  }
+
+  return nearestWall;
+}
+
+/**
+ * Find shared wall between two adjacent rooms
+ */
+export function findSharedWall(
+  room1: RoomBounds,
+  room2: RoomBounds,
+  tolerance: number = 0.5
+): WallSegment | null {
+  const walls1 = getRoomWalls(room1);
+  const walls2 = getRoomWalls(room2);
+
+  for (const w1 of walls1) {
+    for (const w2 of walls2) {
+      // Check if walls are parallel and overlapping
+      if (areWallsShared(w1, w2, tolerance)) {
+        return w1;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Check if two walls are shared (parallel, adjacent, and overlapping)
+ */
+function areWallsShared(
+  wall1: WallSegment,
+  wall2: WallSegment,
+  tolerance: number
+): boolean {
+  // Walls must be on opposite sides (e.g., room1's north = room2's south)
+  const opposites: Record<string, string> = {
+    north: 'south',
+    south: 'north',
+    east: 'west',
+    west: 'east',
+  };
+
+  if (wall2.direction !== opposites[wall1.direction]) {
+    return false;
+  }
+
+  // Check if walls are close enough (adjacent)
+  const w1Mid: Point2D = [
+    (wall1.start[0] + wall1.end[0]) / 2,
+    (wall1.start[1] + wall1.end[1]) / 2,
+  ];
+  const w2Mid: Point2D = [
+    (wall2.start[0] + wall2.end[0]) / 2,
+    (wall2.start[1] + wall2.end[1]) / 2,
+  ];
+
+  // For N/S walls, check Y proximity; for E/W walls, check X proximity
+  if (wall1.direction === 'north' || wall1.direction === 'south') {
+    if (Math.abs(w1Mid[1] - w2Mid[1]) > tolerance) return false;
+    // Check X overlap
+    return hasOverlap(wall1.start[0], wall1.end[0], wall2.start[0], wall2.end[0]);
+  } else {
+    if (Math.abs(w1Mid[0] - w2Mid[0]) > tolerance) return false;
+    // Check Y overlap
+    return hasOverlap(wall1.start[1], wall1.end[1], wall2.start[1], wall2.end[1]);
+  }
+}
+
+/**
+ * Check if two ranges overlap
+ */
+function hasOverlap(a1: number, a2: number, b1: number, b2: number): boolean {
+  const aMin = Math.min(a1, a2);
+  const aMax = Math.max(a1, a2);
+  const bMin = Math.min(b1, b2);
+  const bMax = Math.max(b1, b2);
+
+  return aMin < bMax && bMin < aMax;
+}
+
+/**
+ * Constrain door position to be away from corners
+ */
+export function constrainDoorPosition(
+  point: Point2D,
+  wall: WallSegment,
+  minCornerDistance: number = DOOR_CLEARANCE.cornerDistance
+): Point2D {
+  const isHorizontal = wall.direction === 'north' || wall.direction === 'south';
+
+  if (isHorizontal) {
+    // Constrain X to be at least minCornerDistance from wall ends
+    const minX = Math.min(wall.start[0], wall.end[0]) + minCornerDistance;
+    const maxX = Math.max(wall.start[0], wall.end[0]) - minCornerDistance - DOOR_CLEARANCE.standardWidth;
+    const constrainedX = Math.max(minX, Math.min(maxX, point[0]));
+    return [constrainedX, point[1]];
+  } else {
+    // Constrain Y to be at least minCornerDistance from wall ends
+    const minY = Math.min(wall.start[1], wall.end[1]) + minCornerDistance;
+    const maxY = Math.max(wall.start[1], wall.end[1]) - minCornerDistance - DOOR_CLEARANCE.standardWidth;
+    const constrainedY = Math.max(minY, Math.min(maxY, point[1]));
+    return [point[0], constrainedY];
+  }
+}
+
+/**
+ * Get the midpoint of a wall
+ */
+export function getWallMidpoint(wall: WallSegment): Point2D {
+  return [
+    (wall.start[0] + wall.end[0]) / 2,
+    (wall.start[1] + wall.end[1]) / 2,
+  ];
+}
+
+/**
+ * Calculate door positions for a room
+ */
+export function calculateDoorPositions(
+  room: RoomBounds,
+  adjacentRooms: RoomBounds[],
+  hallways: RoomBounds[]
+): DoorPosition[] {
+  const doors: DoorPosition[] = [];
+  const accessType = ROOM_ACCESS_RULES[room.type];
+
+  // 1. Door to hallway (for rooms that need direct access)
+  if (accessType === 'direct' || accessType === 'hub') {
+    for (const hallway of hallways) {
+      const hallwayCenter: Point2D = [
+        hallway.x + hallway.width / 2,
+        hallway.y + hallway.depth / 2,
+      ];
+
+      const nearestWall = findNearestWall(room, hallwayCenter);
+
+      // Check if wall is long enough for a door
+      if (nearestWall.length >= DOOR_CLEARANCE.standardWidth + DOOR_CLEARANCE.cornerDistance * 2) {
+        const midpoint = getWallMidpoint(nearestWall);
+        const doorPoint = constrainDoorPosition(midpoint, nearestWall);
+
+        doors.push({
+          point: doorPoint,
+          width: DOOR_CLEARANCE.standardWidth,
+          swing: 'inward',
+          connectsTo: hallway.name,
+        });
+      }
+    }
+  }
+
+  // 2. Door to adjacent rooms (if they should have connecting doors)
+  for (const adj of adjacentRooms) {
+    if (shouldHaveConnectingDoor(room.type, adj.type)) {
+      const sharedWall = findSharedWall(room, adj);
+
+      if (sharedWall && sharedWall.length >= DOOR_CLEARANCE.standardWidth + DOOR_CLEARANCE.cornerDistance * 2) {
+        const midpoint = getWallMidpoint(sharedWall);
+        const doorPoint = constrainDoorPosition(midpoint, sharedWall);
+
+        // Prefer pocket doors for closets/pantries
+        const swing = (room.type === 'closet' || room.type === 'pantry' ||
+                       adj.type === 'closet' || adj.type === 'pantry')
+          ? 'pocket'
+          : 'either';
+
+        doors.push({
+          point: doorPoint,
+          width: DOOR_CLEARANCE.standardWidth,
+          swing,
+          connectsTo: adj.name,
+        });
+      }
+    }
+  }
+
+  return doors;
+}
+
+/**
+ * Check if two door positions conflict (overlapping swing areas)
+ */
+export function doDoorsConflict(
+  door1: DoorPosition,
+  door2: DoorPosition
+): boolean {
+  // Pocket doors don't conflict with anything
+  if (door1.swing === 'pocket' || door2.swing === 'pocket') {
+    return false;
+  }
+
+  // Calculate distance between door centers
+  const dist = Math.sqrt(
+    (door1.point[0] - door2.point[0]) ** 2 +
+    (door1.point[1] - door2.point[1]) ** 2
+  );
+
+  // Doors conflict if their swing areas overlap
+  const minDistance = DOOR_CLEARANCE.swingRadius * 2;
+
+  return dist < minDistance;
+}
+
+/**
+ * Validate door placements for a set of rooms
+ */
+export function validateDoorPlacements(
+  allDoors: Array<{ room: string; doors: DoorPosition[] }>
+): { valid: boolean; conflicts: string[] } {
+  const conflicts: string[] = [];
+  const allDoorPositions: Array<{ room: string; door: DoorPosition }> = [];
+
+  // Flatten all doors
+  for (const entry of allDoors) {
+    for (const door of entry.doors) {
+      allDoorPositions.push({ room: entry.room, door });
+    }
+  }
+
+  // Check for conflicts
+  for (let i = 0; i < allDoorPositions.length; i++) {
+    for (let j = i + 1; j < allDoorPositions.length; j++) {
+      const d1 = allDoorPositions[i];
+      const d2 = allDoorPositions[j];
+
+      if (doDoorsConflict(d1.door, d2.door)) {
+        conflicts.push(
+          `Door conflict: ${d1.room} (→${d1.door.connectsTo}) ↔ ${d2.room} (→${d2.door.connectsTo})`
+        );
+      }
+    }
+  }
+
+  return {
+    valid: conflicts.length === 0,
+    conflicts,
+  };
+}
