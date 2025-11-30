@@ -10,10 +10,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::domain::*;
-use crate::geometry::{self, MeshData, SolidCache};
-use crate::rhai_api;
-use crate::store::SharedStore;
+use geometry_core::domain::*;
+use geometry_core::geometry::{self, MeshData, SolidCache};
+use geometry_core::rhai_api;
+use geometry_core::store::{self, SharedStore};
 
 /// Application state shared across handlers
 #[derive(Clone)]

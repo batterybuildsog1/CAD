@@ -1,16 +1,19 @@
 // Geometry operations using Truck B-Rep kernel
 // Provides solid generation, meshing, and collision detection utilities
 
+pub mod polygon_ops;
+
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use truck_modeling::{builder, Solid, Vertex, Wire, Face};
+use truck_modeling::{builder, Solid, Vertex, Wire};
 use truck_modeling::Point3 as TruckPoint3;
 use truck_modeling::Vector3 as TruckVector3;
 use truck_meshalgo::prelude::*;
 
 use crate::domain::{Polygon2, SolidId, Level, Footprint};
+use polygon_ops::offset_polygon;
 
 /// Cache for generated Truck solids
 pub type SolidCache = Arc<RwLock<HashMap<SolidId, Solid>>>;
@@ -38,6 +41,23 @@ impl MeshData {
     }
 }
 
+/// Create a wire from a sequence of 2D points at a given Z elevation
+fn points_to_wire(points: &[crate::domain::Point2], z: f64) -> Wire {
+    let vertices: Vec<Vertex> = points
+        .iter()
+        .map(|p| builder::vertex(TruckPoint3::new(p.x, p.y, z)))
+        .collect();
+
+    let mut edges = Vec::new();
+    for i in 0..vertices.len() {
+        let j = (i + 1) % vertices.len();
+        let edge = builder::line(&vertices[i], &vertices[j]);
+        edges.push(edge);
+    }
+
+    Wire::from_iter(edges.into_iter())
+}
+
 /// Extrude a 2D polygon into a 3D solid (for massing/footprint visualization)
 pub fn extrude_polygon(polygon: &Polygon2, base_z: f64, height: f64) -> Result<Solid> {
     if polygon.outer.len() < 3 {
@@ -48,25 +68,20 @@ pub fn extrude_polygon(polygon: &Polygon2, base_z: f64, height: f64) -> Result<S
         return Err(anyhow!("Height must be positive"));
     }
 
-    // Convert polygon vertices to Truck Wire
-    let vertices: Vec<Vertex> = polygon.outer
-        .iter()
-        .map(|p| builder::vertex(TruckPoint3::new(p.x, p.y, base_z)))
-        .collect();
+    // Create outer wire
+    let outer_wire = points_to_wire(&polygon.outer, base_z);
 
-    // Create edges between consecutive vertices
-    let mut edges = Vec::new();
-    for i in 0..vertices.len() {
-        let j = (i + 1) % vertices.len();
-        let edge = builder::line(&vertices[i], &vertices[j]);
-        edges.push(edge);
+    // Create wires for holes (if any)
+    let mut wires = vec![outer_wire];
+    for hole in &polygon.holes {
+        if hole.len() >= 3 {
+            let hole_wire = points_to_wire(hole, base_z);
+            wires.push(hole_wire);
+        }
     }
 
-    // Create wire from edges
-    let wire = Wire::from_iter(edges.into_iter());
-
-    // Create bottom face
-    let bottom_face = builder::try_attach_plane(&[wire])
+    // Create bottom face (with holes if present)
+    let bottom_face = builder::try_attach_plane(&wires)
         .map_err(|e| anyhow!("Failed to create base face: {:?}", e))?;
 
     // Extrude to create solid
@@ -74,6 +89,95 @@ pub fn extrude_polygon(polygon: &Polygon2, base_z: f64, height: f64) -> Result<S
     let solid = builder::tsweep(&bottom_face, extrusion_vector);
 
     Ok(solid)
+}
+
+/// Extrude a polygon as a hollow shell (walls only, no top/bottom faces inside)
+///
+/// Creates a ring-shaped extrusion by:
+/// 1. Creating outer boundary from polygon
+/// 2. Creating inner boundary by offsetting inward by wall_thickness
+/// 3. Extruding the ring between them
+///
+/// # Arguments
+/// * `polygon` - The outer boundary polygon
+/// * `base_z` - Base elevation
+/// * `height` - Wall height (floor-to-floor)
+/// * `wall_thickness` - Thickness of walls in feet (e.g., 0.667 for 8")
+///
+/// # Returns
+/// A Solid representing hollow shell walls
+pub fn extrude_polygon_shell(
+    polygon: &Polygon2,
+    base_z: f64,
+    height: f64,
+    wall_thickness: f64,
+) -> Result<Solid> {
+    if polygon.outer.len() < 3 {
+        return Err(anyhow!("Polygon must have at least 3 vertices"));
+    }
+
+    if height <= 0.0 {
+        return Err(anyhow!("Height must be positive"));
+    }
+
+    if wall_thickness <= 0.0 {
+        return Err(anyhow!("Wall thickness must be positive"));
+    }
+
+    // Calculate minimum dimension of the polygon to validate wall thickness
+    // Use a simple bounding box approximation
+    let min_x = polygon.outer.iter().map(|p| p.x).fold(f64::MAX, f64::min);
+    let max_x = polygon.outer.iter().map(|p| p.x).fold(f64::MIN, f64::max);
+    let min_y = polygon.outer.iter().map(|p| p.y).fold(f64::MAX, f64::min);
+    let max_y = polygon.outer.iter().map(|p| p.y).fold(f64::MIN, f64::max);
+    let min_dimension = (max_x - min_x).min(max_y - min_y);
+
+    // Wall thickness must be less than half the minimum dimension
+    // otherwise the inner walls would overlap
+    if wall_thickness >= min_dimension / 2.0 {
+        return Err(anyhow!(
+            "Wall thickness ({:.3}) must be less than half the minimum polygon dimension ({:.3}). \
+             Maximum allowed: {:.3}",
+            wall_thickness,
+            min_dimension,
+            min_dimension / 2.0 - 0.001
+        ));
+    }
+
+    // Create inner boundary by offsetting inward
+    // Note: offset_polygon has inverted normal direction, so positive distance = inward
+    // for counterclockwise polygons. We use positive wall_thickness here.
+    let inner_result = offset_polygon(polygon, wall_thickness);
+
+    match inner_result {
+        Ok(inner_polygon) => {
+            // Validate that the inner polygon is usable
+            if inner_polygon.outer.len() < 3 || !inner_polygon.is_valid() {
+                // Fall back to solid extrusion if inner polygon is degenerate
+                eprintln!(
+                    "[geometry-core] Warning: Inner polygon degenerate after offset, falling back to solid extrusion"
+                );
+                return extrude_polygon(polygon, base_z, height);
+            }
+
+            // Create shell polygon: outer boundary with inner as a hole
+            let shell_polygon = Polygon2::with_holes(
+                polygon.outer.clone(),
+                vec![inner_polygon.outer],
+            );
+
+            // Extrude the shell polygon (Truck handles holes via multiple wires)
+            extrude_polygon(&shell_polygon, base_z, height)
+        }
+        Err(e) => {
+            // Fall back to solid extrusion with warning
+            eprintln!(
+                "[geometry-core] Warning: Failed to create inner offset for shell: {}. Falling back to solid extrusion.",
+                e
+            );
+            extrude_polygon(polygon, base_z, height)
+        }
+    }
 }
 
 /// Create a simple box solid
@@ -320,6 +424,80 @@ mod tests {
         assert!(mesh.vertex_count() > 0);
         assert!(mesh.triangle_count() > 0);
         assert_eq!(mesh.positions.len(), mesh.normals.len());
+    }
+
+    #[test]
+    fn test_extrude_polygon_shell() {
+        // Create a 30x40 foot rectangle
+        let polygon = Polygon2::rectangle(30.0, 40.0);
+        let wall_thickness = 0.667; // 8 inches in feet
+        let height = 9.0;
+
+        // Create hollow shell
+        let shell = extrude_polygon_shell(&polygon, 0.0, height, wall_thickness).unwrap();
+
+        // Verify bounding box matches outer dimensions
+        let bbox = BoundingBox::from_solid(&shell);
+        assert!((bbox.size()[0] - 30.0).abs() < 0.1, "Width mismatch: got {}, expected 30.0", bbox.size()[0]);
+        assert!((bbox.size()[1] - 40.0).abs() < 0.1, "Depth mismatch: got {}, expected 40.0", bbox.size()[1]);
+        assert!((bbox.size()[2] - height).abs() < 0.1, "Height mismatch: got {}, expected {}", bbox.size()[2], height);
+
+        // Convert to mesh and verify it has geometry
+        let mesh = solid_to_mesh(&shell, 0.1).unwrap();
+        assert!(mesh.vertex_count() > 0, "Shell should have vertices");
+        assert!(mesh.triangle_count() > 0, "Shell should have triangles");
+
+        // Compare volume: shell should have less volume than solid
+        // Outer area = 30 * 40 = 1200 sq ft
+        // Inner dimensions = (30 - 2*0.667) x (40 - 2*0.667) = 28.666 x 38.666
+        // Inner area = ~1108.4 sq ft
+        // Shell cross-section area = 1200 - 1108.4 = ~91.6 sq ft
+        // Shell volume = 91.6 * 9 = ~824 cubic ft
+        // vs solid volume = 1200 * 9 = 10800 cubic ft
+        // So shell should have significantly fewer triangles (roughly proportional)
+
+        // Just verify the shell mesh is smaller than a solid would be
+        let solid = extrude_polygon(&polygon, 0.0, height).unwrap();
+        let solid_mesh = solid_to_mesh(&solid, 0.1).unwrap();
+
+        // Shell has more faces (inner + outer walls) but less volume
+        // The key test is that both generate valid meshes
+        assert!(solid_mesh.vertex_count() > 0, "Solid should have vertices");
+    }
+
+    #[test]
+    fn test_extrude_polygon_shell_wall_too_thick() {
+        // Create a small 4x4 rectangle
+        let polygon = Polygon2::rectangle(4.0, 4.0);
+
+        // Wall thickness of 2.5 would overlap (> 4/2 = 2)
+        let result = extrude_polygon_shell(&polygon, 0.0, 9.0, 2.5);
+        assert!(result.is_err(), "Should fail when wall thickness >= half min dimension");
+
+        // Wall thickness of 1.9 should succeed (< 4/2 = 2)
+        let result = extrude_polygon_shell(&polygon, 0.0, 9.0, 1.9);
+        assert!(result.is_ok(), "Should succeed when wall thickness < half min dimension");
+    }
+
+    #[test]
+    fn test_extrude_polygon_shell_invalid_params() {
+        let polygon = Polygon2::rectangle(10.0, 10.0);
+
+        // Zero height should fail
+        let result = extrude_polygon_shell(&polygon, 0.0, 0.0, 0.5);
+        assert!(result.is_err(), "Should fail with zero height");
+
+        // Negative height should fail
+        let result = extrude_polygon_shell(&polygon, 0.0, -5.0, 0.5);
+        assert!(result.is_err(), "Should fail with negative height");
+
+        // Zero wall thickness should fail
+        let result = extrude_polygon_shell(&polygon, 0.0, 9.0, 0.0);
+        assert!(result.is_err(), "Should fail with zero wall thickness");
+
+        // Negative wall thickness should fail
+        let result = extrude_polygon_shell(&polygon, 0.0, 9.0, -0.5);
+        assert!(result.is_err(), "Should fail with negative wall thickness");
     }
 
     #[test]

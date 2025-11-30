@@ -1,0 +1,16 @@
+[package]
+name = "geometry-wasm"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+geometry-core = { path = "../geometry-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+getrandom = { version = "0.3", features = ["wasm_js"] }

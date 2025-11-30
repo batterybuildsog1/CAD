@@ -14,6 +14,8 @@ out/
 
 # Rust
 packages/geometry-server/target/
+packages/geometry-core/target/
+packages/geometry-wasm/target/
 **/*.rs.bk
 Cargo.lock
 

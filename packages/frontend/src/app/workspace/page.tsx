@@ -1,7 +1,7 @@
 /**
- * Home Page - Combined Chat + 3D Viewer with Shared WASM Store
+ * Workspace Page - Combined Chat + 3D Viewer with Shared WASM Store
  *
- * This is the main Antigravity CAD workspace implementing the hybrid architecture:
+ * This page demonstrates the hybrid architecture:
  * - Left panel: ChatPanelHybrid (Gemini + WASM tool execution)
  * - Right panel: Viewer3D (shared WasmStore for instant updates)
  *
@@ -14,7 +14,7 @@
 
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { ChatPanelHybrid } from '@/components/ChatPanelHybrid';
 
@@ -28,13 +28,12 @@ const Viewer3D = dynamic(() => import('@/components/Viewer3D').then((mod) => mod
   ),
 });
 
-export default function Home() {
+export default function WorkspacePage() {
   const [levelIds, setLevelIds] = useState<string[]>([]);
   const [viewerKey, setViewerKey] = useState(0);
 
   // Force viewer to re-render when level IDs change
   const handleLevelIdsChange = useCallback((newLevelIds: string[]) => {
-    console.log('[Home] Level IDs changed:', newLevelIds);
     setLevelIds(newLevelIds);
     // Increment key to force re-render of Viewer3D
     setViewerKey((k) => k + 1);
@@ -78,6 +77,8 @@ export default function Home() {
             levelIds={levelIds}
             showGrid={true}
             backgroundColor="#1a1a1a"
+            renderMode="combined"
+            wallThickness={0.667}
           />
 
           {/* Level IDs overlay */}

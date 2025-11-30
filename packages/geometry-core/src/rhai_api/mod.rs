@@ -1,12 +1,20 @@
 // Rhai scripting integration
 // Exposes safe, sandboxed functions for AI and human scripts to drive modeling
+// Updated to use StructuredError for observable feedback loops with Gemini
 
 use rhai::{Dynamic, Engine, EvalAltResult, Map, Scope, AST};
 use std::sync::Arc;
 use anyhow::{anyhow, Result};
 
 use crate::domain::*;
+use crate::domain::error::{StructuredError, EntityType};
 use crate::store::SharedStore;
+
+/// Convert a StructuredError to a Rhai EvalAltResult
+/// The error message is JSON-formatted for Gemini to parse
+fn structured_err(err: StructuredError) -> Box<EvalAltResult> {
+    err.to_rhai_string().into()
+}
 
 /// Result type for Rhai script execution
 #[derive(Debug)]
@@ -101,14 +109,14 @@ fn register_project_functions(engine: &mut Engine, store: SharedStore) {
         let units = match units.to_lowercase().as_str() {
             "imperial" | "us" | "feet" => UnitSystem::Imperial,
             "metric" | "si" | "meters" => UnitSystem::Metric,
-            _ => return Err(format!("Unknown unit system: {}", units).into()),
+            _ => return Err(structured_err(StructuredError::unknown_unit_system(units))),
         };
 
         let code_region = parse_code_region(code_region)?;
 
         let mut store = s.write().unwrap();
         store.create_project(name, units, code_region)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 
     let s = store.clone();
@@ -116,7 +124,7 @@ fn register_project_functions(engine: &mut Engine, store: SharedStore) {
         let store = s.read().unwrap();
         store.get_project(id)
             .map(|p| p.name.clone())
-            .ok_or_else(|| "Project not found".into())
+            .ok_or_else(|| structured_err(StructuredError::entity_not_found(EntityType::Project, id)))
     });
 
     let s = store.clone();
@@ -135,7 +143,7 @@ fn register_building_functions(engine: &mut Engine, store: SharedStore) {
     engine.register_fn("add_building", move |project_id: ProjectId, name: &str| -> Result<BuildingId, Box<EvalAltResult>> {
         let mut store = s.write().unwrap();
         store.add_building(project_id, name)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 
     let s = store.clone();
@@ -143,7 +151,7 @@ fn register_building_functions(engine: &mut Engine, store: SharedStore) {
         let store = s.read().unwrap();
         store.get_building(id)
             .map(|b| b.name.clone())
-            .ok_or_else(|| "Building not found".into())
+            .ok_or_else(|| structured_err(StructuredError::entity_not_found(EntityType::Building, id)))
     });
 
     let s = store.clone();
@@ -159,7 +167,7 @@ fn register_building_functions(engine: &mut Engine, store: SharedStore) {
     engine.register_fn("remove_building", move |id: BuildingId| -> Result<(), Box<EvalAltResult>> {
         let mut store = s.write().unwrap();
         store.remove_building(id)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 }
 
@@ -168,9 +176,19 @@ fn register_building_functions(engine: &mut Engine, store: SharedStore) {
 fn register_level_functions(engine: &mut Engine, store: SharedStore) {
     let s = store.clone();
     engine.register_fn("add_level", move |building_id: BuildingId, name: &str, elevation: f64, floor_to_floor: f64| -> Result<LevelId, Box<EvalAltResult>> {
+        // Validate floor_to_floor height
+        if floor_to_floor <= 0.0 {
+            return Err(structured_err(StructuredError::parameter_out_of_range(
+                "floor_to_floor",
+                floor_to_floor,
+                Some(0.0),
+                None,
+            )));
+        }
+
         let mut store = s.write().unwrap();
         store.add_level(building_id, name, elevation, floor_to_floor)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 
     let s = store.clone();
@@ -178,7 +196,7 @@ fn register_level_functions(engine: &mut Engine, store: SharedStore) {
         let store = s.read().unwrap();
         store.get_level(id)
             .map(|l| l.name.clone())
-            .ok_or_else(|| "Level not found".into())
+            .ok_or_else(|| structured_err(StructuredError::entity_not_found(EntityType::Level, id)))
     });
 
     let s = store.clone();
@@ -186,7 +204,7 @@ fn register_level_functions(engine: &mut Engine, store: SharedStore) {
         let store = s.read().unwrap();
         store.get_level(id)
             .map(|l| l.elevation)
-            .ok_or_else(|| "Level not found".into())
+            .ok_or_else(|| structured_err(StructuredError::entity_not_found(EntityType::Level, id)))
     });
 
     let s = store.clone();
@@ -194,14 +212,14 @@ fn register_level_functions(engine: &mut Engine, store: SharedStore) {
         let store = s.read().unwrap();
         store.get_level(id)
             .map(|l| l.floor_to_floor)
-            .ok_or_else(|| "Level not found".into())
+            .ok_or_else(|| structured_err(StructuredError::entity_not_found(EntityType::Level, id)))
     });
 
     let s = store.clone();
     engine.register_fn("remove_level", move |id: LevelId| -> Result<(), Box<EvalAltResult>> {
         let mut store = s.write().unwrap();
         store.remove_level(id)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 }
 
@@ -215,21 +233,34 @@ fn register_footprint_functions(engine: &mut Engine, store: SharedStore) {
 
         let mut store = s.write().unwrap();
         store.set_level_footprint(level_id, polygon)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 
     // Set footprint from explicit width/depth (rectangle)
     let s = store.clone();
     engine.register_fn("set_level_footprint_rect", move |level_id: LevelId, width: f64, depth: f64| -> Result<FootprintId, Box<EvalAltResult>> {
-        if width <= 0.0 || depth <= 0.0 {
-            return Err("Width and depth must be positive".into());
+        if width <= 0.0 {
+            return Err(structured_err(StructuredError::parameter_out_of_range(
+                "width",
+                width,
+                Some(0.0),
+                None,
+            )));
+        }
+        if depth <= 0.0 {
+            return Err(structured_err(StructuredError::parameter_out_of_range(
+                "depth",
+                depth,
+                Some(0.0),
+                None,
+            )));
         }
 
         let polygon = Polygon2::rectangle(width, depth);
 
         let mut store = s.write().unwrap();
         store.set_level_footprint(level_id, polygon)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 
     let s = store.clone();
@@ -237,7 +268,7 @@ fn register_footprint_functions(engine: &mut Engine, store: SharedStore) {
         let store = s.read().unwrap();
         store.get_level_footprint(level_id)
             .map(|f| f.area())
-            .ok_or_else(|| "Footprint not found".into())
+            .ok_or_else(|| structured_err(StructuredError::entity_not_found(EntityType::Footprint, level_id)))
     });
 
     let s = store.clone();
@@ -245,14 +276,14 @@ fn register_footprint_functions(engine: &mut Engine, store: SharedStore) {
         let store = s.read().unwrap();
         store.get_level_footprint(level_id)
             .map(|f| f.perimeter())
-            .ok_or_else(|| "Footprint not found".into())
+            .ok_or_else(|| structured_err(StructuredError::entity_not_found(EntityType::Footprint, level_id)))
     });
 
     let s = store.clone();
     engine.register_fn("offset_footprint", move |footprint_id: FootprintId, distance: f64| -> Result<(), Box<EvalAltResult>> {
         let mut store = s.write().unwrap();
         store.offset_footprint(footprint_id, distance)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 }
 
@@ -263,7 +294,7 @@ fn register_grid_functions(engine: &mut Engine, store: SharedStore) {
     engine.register_fn("create_grid", move |building_id: BuildingId| -> Result<(), Box<EvalAltResult>> {
         let mut store = s.write().unwrap();
         store.create_grid(building_id)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 
     let s = store.clone();
@@ -271,7 +302,7 @@ fn register_grid_functions(engine: &mut Engine, store: SharedStore) {
         let dir = match direction.to_lowercase().as_str() {
             "horizontal" | "h" | "x" => GridDirection::Horizontal,
             "vertical" | "v" | "y" => GridDirection::Vertical,
-            _ => return Err(format!("Invalid grid direction: {}", direction).into()),
+            _ => return Err(structured_err(StructuredError::unknown_grid_direction(direction))),
         };
 
         let axis = GridAxis {
@@ -282,7 +313,7 @@ fn register_grid_functions(engine: &mut Engine, store: SharedStore) {
 
         let mut store = s.write().unwrap();
         store.add_grid_axis(building_id, axis)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 }
 
@@ -291,20 +322,30 @@ fn register_grid_functions(engine: &mut Engine, store: SharedStore) {
 fn register_wall_functions(engine: &mut Engine, store: SharedStore) {
     let s = store.clone();
     engine.register_fn("create_wall_assembly", move |name: &str| -> Result<WallAssemblyId, Box<EvalAltResult>> {
-        let layers = vec![]; 
+        let layers = vec![];
         let mut store = s.write().unwrap();
         store.create_wall_assembly(name, layers)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 
     let s = store.clone();
     engine.register_fn("create_wall", move |level_id: LevelId, assembly_id: WallAssemblyId, start: Dynamic, end: Dynamic, height: f64| -> Result<WallId, Box<EvalAltResult>> {
         let start_pt = array_to_point(start)?;
         let end_pt = array_to_point(end)?;
-        
+
+        // Validate height
+        if height <= 0.0 {
+            return Err(structured_err(StructuredError::parameter_out_of_range(
+                "height",
+                height,
+                Some(0.0),
+                None,
+            )));
+        }
+
         let mut store = s.write().unwrap();
         store.create_wall(level_id, assembly_id, start_pt, end_pt, height)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 
     let s = store.clone();
@@ -312,7 +353,7 @@ fn register_wall_functions(engine: &mut Engine, store: SharedStore) {
         let store = s.read().unwrap();
         store.get_wall(id)
             .map(|w| w.assembly_id)
-            .ok_or_else(|| "Wall not found".into())
+            .ok_or_else(|| structured_err(StructuredError::entity_not_found(EntityType::Wall, id)))
     });
 }
 
@@ -322,21 +363,22 @@ fn register_room_functions(engine: &mut Engine, store: SharedStore) {
     let s = store.clone();
     engine.register_fn("create_room", move |level_id: LevelId, room_type_str: &str, name: &str, points: rhai::Array| -> Result<RoomId, Box<EvalAltResult>> {
         let polygon = array_to_polygon(points)?;
-        
+
+        // Parse room type - allow custom types but log standard ones
         let room_type = match room_type_str.to_lowercase().as_str() {
-            "living" | "livingroom" => RoomType::LivingRoom,
+            "living" | "livingroom" | "living_room" => RoomType::LivingRoom,
             "kitchen" => RoomType::Kitchen,
             "bedroom" => RoomType::Bedroom,
-            "bathroom" => RoomType::Bathroom,
+            "bathroom" | "bath" => RoomType::Bathroom,
             "garage" => RoomType::Garage,
-            "utility" => RoomType::Utility,
-            "circulation" | "hallway" => RoomType::Hallway,
+            "utility" | "mechanical" => RoomType::Utility,
+            "circulation" | "hallway" | "hall" | "corridor" => RoomType::Hallway,
             other => RoomType::Other(other.to_string()),
         };
 
         let mut store = s.write().unwrap();
         store.create_room(level_id, room_type, name, polygon)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 }
 
@@ -345,15 +387,56 @@ fn register_room_functions(engine: &mut Engine, store: SharedStore) {
 fn register_opening_functions(engine: &mut Engine, store: SharedStore) {
     let s = store.clone();
     engine.register_fn("add_opening", move |wall_id: WallId, type_str: &str, position: f64, width: f64, height: f64, sill: f64| -> Result<OpeningId, Box<EvalAltResult>> {
+        // Parse opening type
         let opening_type = match type_str.to_lowercase().as_str() {
             "window" => OpeningType::Window,
             "door" => OpeningType::Door,
-            _ => return Err(format!("Unknown opening type: {}", type_str).into()),
+            _ => return Err(structured_err(StructuredError::unknown_opening_type(type_str))),
         };
+
+        // Validate position (0.0 to 1.0)
+        if position < 0.0 || position > 1.0 {
+            return Err(structured_err(StructuredError::parameter_out_of_range(
+                "position",
+                position,
+                Some(0.0),
+                Some(1.0),
+            )));
+        }
+
+        // Validate width
+        if width <= 0.0 {
+            return Err(structured_err(StructuredError::parameter_out_of_range(
+                "width",
+                width,
+                Some(0.0),
+                None,
+            )));
+        }
+
+        // Validate height
+        if height <= 0.0 {
+            return Err(structured_err(StructuredError::parameter_out_of_range(
+                "height",
+                height,
+                Some(0.0),
+                None,
+            )));
+        }
+
+        // Validate sill height
+        if sill < 0.0 {
+            return Err(structured_err(StructuredError::parameter_out_of_range(
+                "sill_height",
+                sill,
+                Some(0.0),
+                None,
+            )));
+        }
 
         let mut store = s.write().unwrap();
         store.add_opening(wall_id, opening_type, position, width, height, sill)
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| structured_err(StructuredError::from(e)))
     });
 }
 
@@ -364,7 +447,7 @@ fn register_query_functions(engine: &mut Engine, store: SharedStore) {
     engine.register_fn("get_building_stats", move |building_id: BuildingId| -> Result<Map, Box<EvalAltResult>> {
         let store = s.read().unwrap();
         let stats = store.get_building_stats(building_id)
-            .ok_or("Building not found")?;
+            .ok_or_else(|| structured_err(StructuredError::entity_not_found(EntityType::Building, building_id)))?;
 
         let mut map = Map::new();
         map.insert("total_area".into(), Dynamic::from(stats.total_area));
@@ -377,7 +460,7 @@ fn register_query_functions(engine: &mut Engine, store: SharedStore) {
         let store = s.read().unwrap();
         store.get_event_log(project_id)
             .map(|l| l.len() as i64)
-            .ok_or_else(|| "Project not found".into())
+            .ok_or_else(|| structured_err(StructuredError::entity_not_found(EntityType::Project, project_id)))
     });
 }
 
@@ -389,14 +472,14 @@ fn parse_code_region(s: &str) -> Result<CodeRegion, Box<EvalAltResult>> {
     if parts.len() >= 3 {
         let code = parts[1].to_string();
         let year = parts[2].parse::<u16>()
-            .map_err(|_| format!("Invalid year in code region: {}", s))?;
+            .map_err(|_| structured_err(StructuredError::unknown_code_region(s)))?;
         Ok(CodeRegion::new(code, year))
     } else if s.to_lowercase().contains("irc") {
         Ok(CodeRegion::us_irc_2021())
     } else if s.to_lowercase().contains("ibc") {
         Ok(CodeRegion::us_ibc_2021())
     } else {
-        Err(format!("Unknown code region: {}", s).into())
+        Err(structured_err(StructuredError::unknown_code_region(s)))
     }
 }
 
@@ -419,9 +502,19 @@ fn array_to_point(val: Dynamic) -> Result<Point2, Box<EvalAltResult>> {
     if let Some(pair) = val.clone().try_cast::<rhai::Array>() {
         if pair.len() == 2 {
             let x = extract_number(&pair[0])
-                .ok_or("Expected number for x coordinate")?;
+                .ok_or_else(|| structured_err(StructuredError::invalid_parameter(
+                    "x",
+                    "Expected number for x coordinate",
+                    format!("{:?}", pair[0]),
+                    Some("numeric value".to_string()),
+                )))?;
             let y = extract_number(&pair[1])
-                .ok_or("Expected number for y coordinate")?;
+                .ok_or_else(|| structured_err(StructuredError::invalid_parameter(
+                    "y",
+                    "Expected number for y coordinate",
+                    format!("{:?}", pair[1]),
+                    Some("numeric value".to_string()),
+                )))?;
             return Ok(Point2::new(x, y));
         }
     }
@@ -430,27 +523,53 @@ fn array_to_point(val: Dynamic) -> Result<Point2, Box<EvalAltResult>> {
     if let Some(map) = val.clone().try_cast::<Map>() {
         let x = map.get("x")
             .and_then(|v| extract_number(v))
-            .ok_or("Expected 'x' in point")?;
+            .ok_or_else(|| structured_err(StructuredError::invalid_parameter(
+                "x",
+                "Expected 'x' key with numeric value in point object",
+                "missing or non-numeric",
+                Some("{x: number, y: number}".to_string()),
+            )))?;
         let y = map.get("y")
             .and_then(|v| extract_number(v))
-            .ok_or("Expected 'y' in point")?;
+            .ok_or_else(|| structured_err(StructuredError::invalid_parameter(
+                "y",
+                "Expected 'y' key with numeric value in point object",
+                "missing or non-numeric",
+                Some("{x: number, y: number}".to_string()),
+            )))?;
         return Ok(Point2::new(x, y));
     }
 
-    Err("Invalid point format: expected [x, y] or {x: _, y: _}".into())
+    Err(structured_err(StructuredError::invalid_geometry(
+        "Invalid point format",
+        vec![
+            "Use array format: [x, y]".to_string(),
+            "Or object format: {x: number, y: number}".to_string(),
+        ],
+    )))
 }
 
 fn array_to_polygon(arr: rhai::Array) -> Result<Polygon2, Box<EvalAltResult>> {
     let mut points = Vec::with_capacity(arr.len());
 
-    for item in arr {
+    for (idx, item) in arr.iter().enumerate() {
         // Try as array first [x, y]
         if let Some(pair) = item.clone().try_cast::<rhai::Array>() {
             if pair.len() == 2 {
                 let x = extract_number(&pair[0])
-                    .ok_or("Expected number for x coordinate")?;
+                    .ok_or_else(|| structured_err(StructuredError::invalid_parameter(
+                        format!("points[{}].x", idx),
+                        "Expected number for x coordinate",
+                        format!("{:?}", pair[0]),
+                        Some("numeric value".to_string()),
+                    )))?;
                 let y = extract_number(&pair[1])
-                    .ok_or("Expected number for y coordinate")?;
+                    .ok_or_else(|| structured_err(StructuredError::invalid_parameter(
+                        format!("points[{}].y", idx),
+                        "Expected number for y coordinate",
+                        format!("{:?}", pair[1]),
+                        Some("numeric value".to_string()),
+                    )))?;
                 points.push(Point2::new(x, y));
                 continue;
             }
@@ -460,19 +579,38 @@ fn array_to_polygon(arr: rhai::Array) -> Result<Polygon2, Box<EvalAltResult>> {
         if let Some(map) = item.clone().try_cast::<Map>() {
             let x = map.get("x")
                 .and_then(|v| extract_number(v))
-                .ok_or("Expected 'x' in point")?;
+                .ok_or_else(|| structured_err(StructuredError::invalid_parameter(
+                    format!("points[{}].x", idx),
+                    "Expected 'x' key with numeric value",
+                    "missing or non-numeric",
+                    Some("{x: number, y: number}".to_string()),
+                )))?;
             let y = map.get("y")
                 .and_then(|v| extract_number(v))
-                .ok_or("Expected 'y' in point")?;
+                .ok_or_else(|| structured_err(StructuredError::invalid_parameter(
+                    format!("points[{}].y", idx),
+                    "Expected 'y' key with numeric value",
+                    "missing or non-numeric",
+                    Some("{x: number, y: number}".to_string()),
+                )))?;
             points.push(Point2::new(x, y));
             continue;
         }
 
-        return Err("Invalid point format: expected [x, y] or {x: _, y: _}".into());
+        return Err(structured_err(StructuredError::invalid_geometry(
+            format!("Invalid point format at index {}", idx),
+            vec![
+                "Use array format: [x, y]".to_string(),
+                "Or object format: {x: number, y: number}".to_string(),
+            ],
+        )));
     }
 
     if points.len() < 3 {
-        return Err("Polygon requires at least 3 points".into());
+        return Err(structured_err(StructuredError::degenerate_geometry(
+            EntityType::Footprint,
+            format!("Polygon requires at least 3 points, got {}", points.len()),
+        )));
     }
 
     Ok(Polygon2::new(points))

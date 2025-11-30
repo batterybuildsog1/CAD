@@ -1,14 +1,14 @@
 // Antigravity CAD - Geometry Server
 // Rust backend for building design with Truck geometry kernel and Rhai scripting
 
-mod domain;
-mod store;
-mod rhai_api;
-mod geometry;
+use axum::Router;
+use std::net::SocketAddr;
+use tower_http::trace::TraceLayer;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
 mod api;
 
-use std::net::SocketAddr;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use geometry_core::{domain, store, geometry, rhai_api};
 
 #[tokio::main]
 async fn main() {

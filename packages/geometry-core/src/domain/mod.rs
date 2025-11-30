@@ -8,6 +8,7 @@ pub mod events;
 pub mod wall;
 pub mod room;
 pub mod opening;
+pub mod error;
 
 // Re-export commonly used types
 pub use ids::*;
@@ -21,3 +22,4 @@ pub use events::{Event, EventId, EventKind, EventLog, SolidSource};
 pub use wall::{WallLayer, WallAssembly, Wall};
 pub use room::{RoomType, Room};
 pub use opening::{OpeningType, Opening, WindowProperties, DoorProperties};
+pub use error::{StructuredError, ErrorCode, EntityType};
