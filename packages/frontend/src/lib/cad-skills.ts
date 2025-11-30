@@ -456,6 +456,85 @@ function checkOverlap(
 }
 
 /**
+ * Check if room bounds fit within the building footprint.
+ * Footprint is assumed to start at origin (0,0).
+ *
+ * @param roomBounds - { minX, minY, maxX, maxY } of proposed room
+ * @param footprint - { width, depth } of building footprint
+ * @returns { fitsInside: boolean, violation?: string }
+ */
+function checkFootprintBounds(
+  roomBounds: { minX: number; minY: number; maxX: number; maxY: number },
+  footprint: { width: number; depth: number }
+): { fitsInside: boolean; violation?: string } {
+  const violations: string[] = [];
+
+  if (roomBounds.minX < 0) {
+    violations.push(`extends ${Math.abs(roomBounds.minX).toFixed(1)}' west of footprint`);
+  }
+  if (roomBounds.minY < 0) {
+    violations.push(`extends ${Math.abs(roomBounds.minY).toFixed(1)}' south of footprint`);
+  }
+  if (roomBounds.maxX > footprint.width) {
+    violations.push(`extends ${(roomBounds.maxX - footprint.width).toFixed(1)}' east of footprint`);
+  }
+  if (roomBounds.maxY > footprint.depth) {
+    violations.push(`extends ${(roomBounds.maxY - footprint.depth).toFixed(1)}' north of footprint`);
+  }
+
+  if (violations.length > 0) {
+    return { fitsInside: false, violation: violations.join(', ') };
+  }
+  return { fitsInside: true };
+}
+
+/**
+ * Check if outdoor space is positioned at the exterior of the footprint.
+ * Outdoor spaces should touch at least one edge of the footprint.
+ *
+ * @param roomBounds - { minX, minY, maxX, maxY } of proposed outdoor space
+ * @param footprint - { width, depth } of building footprint
+ * @returns { atExterior: boolean, suggestion?: string }
+ */
+function checkOutdoorExterior(
+  roomBounds: { minX: number; minY: number; maxX: number; maxY: number },
+  footprint: { width: number; depth: number }
+): { atExterior: boolean; suggestion?: string } {
+  // Outdoor space should either:
+  // 1. Be completely outside the footprint (ideal - extends beyond edge)
+  // 2. Touch at least one edge of the footprint (acceptable - at perimeter)
+
+  const touchesWest = roomBounds.minX <= 0;
+  const touchesSouth = roomBounds.minY <= 0;
+  const touchesEast = roomBounds.maxX >= footprint.width;
+  const touchesNorth = roomBounds.maxY >= footprint.depth;
+
+  const extendsOutside = roomBounds.minX < 0 || roomBounds.minY < 0 ||
+                         roomBounds.maxX > footprint.width || roomBounds.maxY > footprint.depth;
+
+  // Check if it's completely inside (bad - outdoor space shouldn't be inside)
+  const completelyInside = roomBounds.minX > 0 && roomBounds.minY > 0 &&
+                           roomBounds.maxX < footprint.width && roomBounds.maxY < footprint.depth;
+
+  if (completelyInside) {
+    return {
+      atExterior: false,
+      suggestion: 'Outdoor space is inside the building footprint. Position it at an exterior edge using relative positioning to an exterior room.',
+    };
+  }
+
+  // If it touches at least one edge or extends outside, it's acceptable
+  if (touchesWest || touchesSouth || touchesEast || touchesNorth || extendsOutside) {
+    return { atExterior: true };
+  }
+
+  return {
+    atExterior: false,
+    suggestion: 'Position outdoor space adjacent to an exterior wall (NORTH, SOUTH, EAST, or WEST edge of building).',
+  };
+}
+
+/**
  * Find a valid non-overlapping position for a room.
  * Tries multiple positions around existing rooms, picking the best one.
  *
@@ -732,6 +811,8 @@ export function createRectangularRoom(
       maxX: origin[0] + width,
       maxY: origin[1] + depth,
     };
+
+    // Check overlap with existing rooms
     const { overlaps, conflictingRoom } = checkOverlap(finalBounds, currentState.floorplan.rooms, 0);
     if (overlaps) {
       return {
@@ -740,6 +821,37 @@ export function createRectangularRoom(
         message: `Cannot create "${name}" at [${origin[0]}, ${origin[1]}] - overlaps with "${conflictingRoom}"`,
         error: `Position validation failed. The calculated position overlaps an existing room.`,
       };
+    }
+
+    // Check footprint bounds (only if footprint is defined)
+    const footprint = currentState.layout.boundingBox;
+    if (footprint.width > 0 && footprint.depth > 0) {
+      // Outdoor room types are allowed to extend beyond footprint
+      const isOutdoorType = roomType === 'patio' || roomType === 'deck';
+
+      if (isOutdoorType) {
+        // Outdoor spaces must be at the exterior (touch or extend beyond an edge)
+        const { atExterior, suggestion } = checkOutdoorExterior(finalBounds, footprint);
+        if (!atExterior) {
+          return {
+            success: false,
+            toolCalls: [],
+            message: `Cannot create "${name}" inside building footprint`,
+            error: suggestion || 'Outdoor spaces must be positioned at the building perimeter.',
+          };
+        }
+      } else {
+        // Indoor rooms must fit within footprint
+        const { fitsInside, violation } = checkFootprintBounds(finalBounds, footprint);
+        if (!fitsInside) {
+          return {
+            success: false,
+            toolCalls: [],
+            message: `Cannot create "${name}" - room ${violation}`,
+            error: `Room extends beyond building footprint (${footprint.width}'×${footprint.depth}'). Adjust position or room size.`,
+          };
+        }
+      }
     }
   }
 
