@@ -197,6 +197,8 @@ export interface SkillResult {
   message: string;
   data?: unknown;
   error?: string;
+  /** Warnings about non-ideal conditions - operation proceeds but user should be aware */
+  warnings?: string[];
 }
 
 /**
@@ -665,6 +667,9 @@ export function createRectangularRoom(
   // Calculate origin based on position type
   let origin: [number, number];
 
+  // Collect warnings instead of blocking (context over rules philosophy)
+  const warnings: string[] = [];
+
   switch (position.type) {
     case 'absolute':
       origin = [position.x, position.y];
@@ -712,7 +717,7 @@ export function createRectangularRoom(
           break;
       }
 
-      // Validate relative positioning doesn't overlap with third rooms
+      // Check relative positioning for overlaps - WARN, don't block
       {
         const bounds = {
           minX: origin[0],
@@ -722,12 +727,7 @@ export function createRectangularRoom(
         };
         const { overlaps, conflictingRoom } = checkOverlap(bounds, currentState.floorplan.rooms, 0.5);
         if (overlaps) {
-          return {
-            success: false,
-            toolCalls: [],
-            message: `Cannot place "${name}" ${position.direction} of "${position.relativeTo}" - would overlap with "${conflictingRoom}"`,
-            error: `Room overlap detected. Try a different direction or adjust room sizes.`,
-          };
+          warnings.push(`Placing "${name}" ${position.direction} of "${position.relativeTo}" overlaps with "${conflictingRoom}" - consider adjusting`);
         }
       }
       break;
@@ -792,12 +792,10 @@ export function createRectangularRoom(
         origin = foundPosition;
         console.log(`[createRectangularRoom] Auto-placed "${name}" using strategy: ${strategy}`);
       } else {
-        return {
-          success: false,
-          toolCalls: [],
-          message: `Cannot auto-place "${name}" - no valid position found that doesn't overlap existing rooms`,
-          error: `All candidate positions overlap. Try specifying position manually with position_type='relative' or 'absolute'.`,
-        };
+        // Fallback: place at origin with warning - let Gemini see and adjust
+        origin = [0, 0];
+        warnings.push(`Auto-placement failed for "${name}" - placed at origin (0,0). All candidate positions overlapped. Consider using position_type='absolute' with specific coordinates.`);
+        console.log(`[createRectangularRoom] Auto-place failed for "${name}" - falling back to origin`);
       }
       break;
     }
@@ -812,44 +810,32 @@ export function createRectangularRoom(
       maxY: origin[1] + depth,
     };
 
-    // Check overlap with existing rooms
+    // Check overlap with existing rooms - WARN, don't block
     const { overlaps, conflictingRoom } = checkOverlap(finalBounds, currentState.floorplan.rooms, 0);
     if (overlaps) {
-      return {
-        success: false,
-        toolCalls: [],
-        message: `Cannot create "${name}" at [${origin[0]}, ${origin[1]}] - overlaps with "${conflictingRoom}"`,
-        error: `Position validation failed. The calculated position overlaps an existing room.`,
-      };
+      warnings.push(`Room overlaps with "${conflictingRoom}" - consider adjusting position`);
     }
 
-    // Check footprint bounds (only if footprint is defined)
-    const footprint = currentState.layout.boundingBox;
+    // Check footprint bounds (use footprint if set, fall back to boundingBox)
+    const footprint = currentState.layout.footprint?.width > 0
+      ? currentState.layout.footprint
+      : currentState.layout.boundingBox;
+
     if (footprint.width > 0 && footprint.depth > 0) {
-      // Outdoor room types are allowed to extend beyond footprint
+      // Outdoor room types can extend beyond footprint
       const isOutdoorType = roomType === 'patio' || roomType === 'deck';
 
       if (isOutdoorType) {
-        // Outdoor spaces must be at the exterior (touch or extend beyond an edge)
-        const { atExterior, suggestion } = checkOutdoorExterior(finalBounds, footprint);
+        // Outdoor spaces should be at the exterior
+        const { atExterior } = checkOutdoorExterior(finalBounds, footprint);
         if (!atExterior) {
-          return {
-            success: false,
-            toolCalls: [],
-            message: `Cannot create "${name}" inside building footprint`,
-            error: suggestion || 'Outdoor spaces must be positioned at the building perimeter.',
-          };
+          warnings.push(`Outdoor space "${name}" is inside building - typically placed at perimeter`);
         }
       } else {
-        // Indoor rooms must fit within footprint
+        // Indoor rooms - warn if outside footprint but allow
         const { fitsInside, violation } = checkFootprintBounds(finalBounds, footprint);
         if (!fitsInside) {
-          return {
-            success: false,
-            toolCalls: [],
-            message: `Cannot create "${name}" - room ${violation}`,
-            error: `Room extends beyond building footprint (${footprint.width}'×${footprint.depth}'). Adjust position or room size.`,
-          };
+          warnings.push(`Room ${violation} (footprint is ${footprint.width}'×${footprint.depth}')`);
         }
       }
     }
@@ -874,11 +860,18 @@ export function createRectangularRoom(
     },
   };
 
+  // Build message with any warnings
+  let message = `Create ${name} (${roomType}): ${width}' x ${depth}' = ${width * depth} sq ft`;
+  if (warnings.length > 0) {
+    message += ` [WARNINGS: ${warnings.join('; ')}]`;
+  }
+
   return {
     success: true,
     toolCalls: [toolCall],
-    message: `Create ${name} (${roomType}): ${width}' x ${depth}' = ${width * depth} sq ft`,
+    message,
     data: { points, area: width * depth },
+    warnings: warnings.length > 0 ? warnings : undefined,
   };
 }
 
@@ -903,14 +896,11 @@ export function createHallway(
   width: number,
   currentState: ObservableState
 ): SkillResult {
-  // Validate width
+  const warnings: string[] = [];
+
+  // Check width - WARN for code compliance, don't block
   if (width < 3) {
-    return {
-      success: false,
-      toolCalls: [],
-      message: 'Hallway too narrow',
-      error: `Hallway width must be at least 3' for code compliance. Got ${width}'`,
-    };
+    warnings.push(`Hallway width ${width}' is below IRC minimum of 3' - consider widening`);
   }
 
   // Find rooms
@@ -991,11 +981,18 @@ export function createHallway(
     },
   };
 
+  // Build message with any warnings
+  let message = `Create hallway ${width}' wide x ${length.toFixed(1)}' long connecting ${fromRoom} to ${toRoom}`;
+  if (warnings.length > 0) {
+    message += ` [WARNINGS: ${warnings.join('; ')}]`;
+  }
+
   return {
     success: true,
     toolCalls: [toolCall],
-    message: `Create hallway ${width}' wide x ${length.toFixed(1)}' long connecting ${fromRoom} to ${toRoom}`,
+    message,
     data: { points, length, width },
+    warnings: warnings.length > 0 ? warnings : undefined,
   };
 }
 
@@ -1149,7 +1146,7 @@ export function layoutFloor(
     }
   }
 
-  // Check bounding box constraint
+  // Check bounding box constraint - WARN, don't block (advisory layout may need manual adjustment)
   if (boundingBox) {
     let maxX = 0,
       maxY = 0;
@@ -1161,13 +1158,13 @@ export function layoutFloor(
     }
 
     if (maxX > boundingBox.width) {
-      conflicts.push(
-        `Layout exceeds width: ${maxX.toFixed(1)}' vs ${boundingBox.width}' allowed`
+      warnings.push(
+        `Layout exceeds width: ${maxX.toFixed(1)}' vs ${boundingBox.width}' footprint - rooms may need repositioning`
       );
     }
     if (maxY > boundingBox.depth) {
-      conflicts.push(
-        `Layout exceeds depth: ${maxY.toFixed(1)}' vs ${boundingBox.depth}' allowed`
+      warnings.push(
+        `Layout exceeds depth: ${maxY.toFixed(1)}' vs ${boundingBox.depth}' footprint - rooms may need repositioning`
       );
     }
   }
@@ -1280,15 +1277,11 @@ export function createBedroom(
   const width = Math.ceil(Math.sqrt(targetArea / 1.2));
   const depth = Math.ceil(targetArea / width);
 
-  // Validate minimum dimensions
+  // Check minimum dimensions - WARN for code compliance, don't block
   const actualArea = width * depth;
+  const codeWarnings: string[] = [];
   if (actualArea < 70) {
-    return {
-      success: false,
-      toolCalls: [],
-      message: 'Bedroom too small for code compliance',
-      error: `Bedroom area ${actualArea} sq ft is below IRC minimum of 70 sq ft`,
-    };
+    codeWarnings.push(`Bedroom area ${actualArea} sq ft is below IRC minimum of 70 sq ft - consider increasing size`);
   }
 
   // Create the bedroom first
@@ -1302,9 +1295,15 @@ export function createBedroom(
     currentState
   );
 
-  // If not including closet or bedroom creation failed, return bedroom result
+  // Merge code warnings with bedroom result warnings
+  const allWarnings = [...codeWarnings, ...(bedroomResult.warnings || [])];
+
+  // If not including closet or bedroom creation failed, return bedroom result (with merged warnings)
   if (!includeCloset || !bedroomResult.success) {
-    return bedroomResult;
+    return {
+      ...bedroomResult,
+      warnings: allWarnings.length > 0 ? allWarnings : undefined,
+    };
   }
 
   // Auto-create closet adjacent to bedroom
@@ -1329,8 +1328,8 @@ export function createBedroom(
 
   if (bedroomPoints && bedroomPoints.length >= 4) {
     // Calculate bedroom bounds from points
-    const xs = bedroomPoints.map(p => p[0]);
-    const ys = bedroomPoints.map(p => p[1]);
+    const xs = bedroomPoints.map((p) => p[0]);
+    const ys = bedroomPoints.map((p) => p[1]);
     const bedroomBounds = {
       minX: Math.min(...xs),
       maxX: Math.max(...xs),
@@ -1338,13 +1337,19 @@ export function createBedroom(
       maxY: Math.max(...ys),
     };
 
-    // Create mock state with the new bedroom included
+    // Create mock state with the new bedroom included.
+    // Preserve the original polygon points so downstream logic (and Gemini)
+    // can reason about exact shapes instead of just bounding boxes.
     const newBedroomEntry: RoomSummary = {
       id: `temp-${name}` as `room-${string}`, // Temporary ID for positioning
       name: name,
       type: 'bedroom',
+      points: bedroomPoints,
       bounds: bedroomBounds,
-      center: [(bedroomBounds.minX + bedroomBounds.maxX) / 2, (bedroomBounds.minY + bedroomBounds.maxY) / 2],
+      center: [
+        (bedroomBounds.minX + bedroomBounds.maxX) / 2,
+        (bedroomBounds.minY + bedroomBounds.maxY) / 2,
+      ],
       dimensions: { width, depth },
       area: actualArea,
     };
@@ -1376,6 +1381,9 @@ export function createBedroom(
   const closetData = closetResult.data as { area?: number } | undefined;
   const closetArea = closetData?.area ?? (closetConfig.minWidth * closetConfig.minDepth);
 
+  // Merge all warnings from bedroom, closet, and code checks
+  const finalWarnings = [...allWarnings, ...(closetResult.warnings || [])];
+
   return {
     success: bedroomResult.success && closetResult.success,
     toolCalls: combinedToolCalls,
@@ -1388,6 +1396,7 @@ export function createBedroom(
       totalArea: actualArea + (closetResult.success ? closetArea : 0),
     },
     error: closetResult.success ? undefined : closetResult.error,
+    warnings: finalWarnings.length > 0 ? finalWarnings : undefined,
   };
 }
 
@@ -2807,12 +2816,19 @@ export function executeSkill(
       // Use layoutFloor to plan positions
       const plan = layoutFloor(rooms, adjacencies, { width: footprintWidth, depth: footprintDepth });
 
+      // Build message with any warnings
+      let message = `Template "${templateName}" applied: ${plan.rooms.length} rooms positioned.`;
+      if (plan.warnings.length > 0) {
+        message += ` [WARNINGS: ${plan.warnings.join('; ')}]`;
+      }
+      if (plan.conflicts.length > 0) {
+        message += ` [CONFLICTS: ${plan.conflicts.join('; ')}]`;
+      }
+
       return {
-        success: plan.conflicts.length === 0,
+        success: plan.conflicts.length === 0, // Only fail for true conflicts like unsatisfied required adjacencies
         toolCalls: [], // Advisory - returns plan, doesn't create rooms
-        message: plan.conflicts.length === 0
-          ? `Template "${templateName}" applied: ${plan.rooms.length} rooms positioned. Use these positions with skill_create_rectangular_room.`
-          : `Layout conflicts: ${plan.conflicts.join('; ')}`,
+        message,
         data: {
           template: templateName,
           templateDescription: template.description,
@@ -2821,6 +2837,7 @@ export function executeSkill(
           usageInstructions: 'Create each room using skill_create_rectangular_room with position_type="absolute" and the position_x/position_y from plan.rooms',
         },
         error: plan.conflicts.length > 0 ? plan.conflicts.join('; ') : undefined,
+        warnings: plan.warnings.length > 0 ? plan.warnings : undefined,
       };
     }
 

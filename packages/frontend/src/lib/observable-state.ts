@@ -115,6 +115,12 @@ export interface RoomSummary {
   dimensions: { width: number; depth: number };
   /** Room area in square feet */
   area: number;
+  /**
+   * Original room polygon points (counter‑clockwise, usually rectangle).
+   * This preserves exact shape for visualization and pathfinding instead of
+   * reconstructing from a bounding box.
+   */
+  points: Point2D[];
   /** Bounding box for collision detection */
   bounds: BoundingBox2D;
 }
@@ -164,7 +170,9 @@ export interface BoundingBox2D {
 export interface LayoutSummary {
   /** Total floor area in square feet */
   totalArea: number;
-  /** Overall bounding box dimensions */
+  /** Building footprint dimensions (set by set_level_footprint_rect) */
+  footprint: { width: number; depth: number };
+  /** Overall bounding box of placed rooms */
   boundingBox: { width: number; depth: number };
   /** Room adjacency descriptions (human-readable) */
   roomAdjacencies: string[];
@@ -630,6 +638,7 @@ export function createEmptyState(): ObservableState {
     },
     layout: {
       totalArea: 0,
+      footprint: { width: 0, depth: 0 },
       boundingBox: { width: 0, depth: 0 },
       roomAdjacencies: [],
       circulation: [],
@@ -650,6 +659,28 @@ export function createEmptyState(): ObservableState {
       buildingId: null,
       levelId: null,
       units: 'imperial',
+    },
+  };
+}
+
+/**
+ * Set the building footprint in state (called when set_level_footprint_rect executes)
+ * This is the ACTUAL footprint - rooms should fit within these bounds.
+ */
+export function setFootprintInState(
+  state: ObservableState,
+  width: number,
+  depth: number
+): ObservableState {
+  return {
+    ...state,
+    layout: {
+      ...state.layout,
+      footprint: { width, depth },
+      // Also initialize boundingBox to footprint if not yet set
+      boundingBox: state.layout.boundingBox.width === 0
+        ? { width, depth }
+        : state.layout.boundingBox,
     },
   };
 }
@@ -729,6 +760,7 @@ export function createRoomSummary(
       depth: bounds.maxY - bounds.minY,
     },
     area,
+    points,
     bounds,
   };
 }
@@ -932,6 +964,18 @@ export function formatStateForLLM(state: ObservableState): string {
     }
   }
 
+  // Footprint and coordinate context (critical for Gemini to understand positioning)
+  if (state.layout.footprint.width > 0) {
+    lines.push('');
+    lines.push('=== BUILDING FOOTPRINT ===');
+    lines.push(`Size: ${state.layout.footprint.width.toFixed(0)}' × ${state.layout.footprint.depth.toFixed(0)}'`);
+    lines.push(`Coordinates: (0,0) at SW corner, X→East [0-${state.layout.footprint.width.toFixed(0)}], Y→North [0-${state.layout.footprint.depth.toFixed(0)}]`);
+    const footprintArea = state.layout.footprint.width * state.layout.footprint.depth;
+    const usedArea = state.layout.totalArea;
+    const remainingArea = footprintArea - usedArea;
+    lines.push(`Remaining space: ${remainingArea.toFixed(0)} sq ft (${((remainingArea / footprintArea) * 100).toFixed(0)}% available)`);
+  }
+
   // Current state summary
   lines.push('');
   lines.push('=== CURRENT FLOORPLAN ===');
@@ -939,9 +983,6 @@ export function formatStateForLLM(state: ObservableState): string {
   lines.push(`Walls: ${state.floorplan.walls.length}`);
   lines.push(`Openings: ${state.floorplan.openings.length}`);
   lines.push(`Total Area: ${state.layout.totalArea.toFixed(0)} sq ft`);
-  if (state.layout.boundingBox.width > 0) {
-    lines.push(`Bounding Box: ${state.layout.boundingBox.width.toFixed(0)}' (E-W) x ${state.layout.boundingBox.depth.toFixed(0)}' (N-S)`);
-  }
 
   // Room details
   if (state.floorplan.rooms.length > 0) {
