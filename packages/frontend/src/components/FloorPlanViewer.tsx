@@ -3,6 +3,7 @@
 import { useMemo } from 'react';
 import type { ObservableToolResult } from '@/lib/gemini-cad';
 import type { ToolCall } from '@/lib/gemini-types';
+import type { RoomSummary } from '@/lib/observable-state';
 
 // ============================================================================
 // Types
@@ -39,150 +40,44 @@ const ROOM_COLORS: Record<string, string> = {
 // ============================================================================
 
 export function FloorPlanViewer({ history }: FloorPlanViewerProps) {
-  // Extract rooms from tool call history, tracking active levels to avoid duplicates
+  // Extract rooms from the LLM-friendly observable state.
+  // This is the canonical source of truth for room geometry. If it is
+  // missing or empty, we deliberately show "no rooms" rather than guessing
+  // shapes from tool history to avoid misleading boxes.
   const rooms = useMemo(() => {
-    const extractedRooms: Room[] = [];
+    if (history.length === 0) return [] as Room[];
 
-    // Track which levels are active (added but not removed)
-    // This prevents showing duplicate rooms when Gemini retries with remove_level/add_level
-    const activeLevels = new Set<string>();
-    const removedLevels = new Set<string>();
-    let currentLevelId: string | undefined;
+    const latest = history[history.length - 1]?.result;
+    const llmRooms: RoomSummary[] | undefined = latest?.llmState?.floorplan?.rooms;
 
-    // First pass: identify active vs removed levels
-    // NOTE: add_level RETURNS the level_id as result.data, not as an input arg
-    for (const { call, result } of history) {
-      if (call.name === 'add_level' && result.status === 'success') {
-        // Level ID comes from the result, not the args
-        const levelId = result.data as string;
-        if (levelId) {
-          activeLevels.add(levelId);
-          currentLevelId = levelId;
-        }
-      } else if (call.name === 'remove_level') {
-        const levelId = call.args.level_id as string;
-        activeLevels.delete(levelId);
-        removedLevels.add(levelId);
-      }
-    }
+    if (llmRooms && llmRooms.length > 0) {
+      return llmRooms.map((room) => {
+        const pts =
+          room.points && room.points.length >= 3
+            ? room.points
+            : ([
+                [room.bounds.minX, room.bounds.minY],
+                [room.bounds.maxX, room.bounds.minY],
+                [room.bounds.maxX, room.bounds.maxY],
+                [room.bounds.minX, room.bounds.maxY],
+              ] as [number, number][]);
 
-    // Second pass: extract rooms, tracking level context and skipping removed levels
-    currentLevelId = undefined;
+        const center = room.center as [number, number];
 
-    for (const { call, result } of history) {
-      // Track current level context
-      if (call.name === 'add_level' && result.status === 'success') {
-        // Level ID comes from the result, not the args
-        currentLevelId = result.data as string;
-        // Skip if this level was later removed
-        if (currentLevelId && removedLevels.has(currentLevelId)) {
-          continue;
-        }
-      } else if (call.name === 'remove_level') {
-        // Skip processing - level is being removed
-        continue;
-      }
-
-      if (result.status !== 'success') continue;
-
-      // Check for room creation in result data
-      const data = result.data as Record<string, unknown> | undefined;
-      if (!data) continue;
-
-      // Get room info from the tool call args
-      const args = call.args;
-      const name = args.name as string | undefined;
-      const roomType = args.room_type as string | undefined;
-
-      // For create_room, the level_id is passed as an argument
-      // Use explicit level_id from args, fallback to context tracking
-      const roomLevelId = (args.level_id as string) || currentLevelId;
-
-      // Skip rooms from removed levels
-      if (roomLevelId && removedLevels.has(roomLevelId)) {
-        continue;
-      }
-
-      // Get points from result data
-      let points = data.points as [number, number][] | undefined;
-
-      // If no points in result, try to construct from dimensions
-      if (!points && data.area) {
-        // For skills that return area but not points, construct from position
-        const width = args.width as number || (data as any).width || 10;
-        const depth = args.depth as number || (data as any).depth || 10;
-
-        // Try to get position from relative positioning
-        let x = 0, y = 0;
-        if (args.position_x !== undefined) {
-          x = args.position_x as number;
-          y = args.position_y as number || 0;
-        }
-
-        // Simple heuristic: stack rooms based on index
-        if (extractedRooms.length > 0) {
-          const lastRoom = extractedRooms[extractedRooms.length - 1];
-          const lastBounds = getBounds(lastRoom.points);
-
-          // Place based on direction if specified
-          const direction = args.direction as string;
-          switch (direction) {
-            case 'SOUTH':
-              x = lastRoom.center[0] - width / 2;
-              y = lastBounds.minY - depth;
-              break;
-            case 'NORTH':
-              x = lastRoom.center[0] - width / 2;
-              y = lastBounds.maxY;
-              break;
-            case 'EAST':
-              x = lastBounds.maxX;
-              y = lastRoom.center[1] - depth / 2;
-              break;
-            case 'WEST':
-              x = lastBounds.minX - width;
-              y = lastRoom.center[1] - depth / 2;
-              break;
-            default:
-              // Default: place to the right
-              x = lastBounds.maxX + 2;
-              y = lastBounds.minY;
-          }
-        }
-
-        points = [
-          [x, y],
-          [x + width, y],
-          [x + width, y + depth],
-          [x, y + depth],
-        ];
-      }
-
-      if (points && points.length >= 3 && name) {
-        const center = calculateCenter(points);
-        const area = calculateArea(points);
-
-        // Check for duplicate room names - keep the latest version
-        const existingIndex = extractedRooms.findIndex(r => r.name === name);
-        const newRoom: Room = {
-          name,
-          type: roomType || 'other',
-          points,
+        return {
+          name: room.name,
+          type: room.type,
+          points: pts,
           center,
-          area,
-          levelId: roomLevelId,
-        };
-
-        if (existingIndex >= 0) {
-          // Replace existing room with same name (Gemini may be updating it)
-          extractedRooms[existingIndex] = newRoom;
-        } else {
-          extractedRooms.push(newRoom);
-        }
-      }
+          area: room.area,
+          levelId: undefined,
+        } as Room;
+      });
     }
 
-    return extractedRooms;
+    // No reliable observable state yet – fail fast with "no rooms"
+    // instead of fabricating boxes from partial tool history.
+    return [] as Room[];
   }, [history]);
 
   // Calculate view bounds

@@ -199,94 +199,76 @@ export function Viewer3D({
     }
 
     const newMeshes: LevelMeshData[] = [];
-    // Cast store to extended type for new methods
     const extendedStore = store as unknown as WasmStoreExtended;
 
     console.log('[Viewer3D] Rendering levels:', levelIds, 'mode:', renderMode);
 
     for (let i = 0; i < levelIds.length; i++) {
       const levelId = levelIds[i];
-      try {
-        if (renderMode === 'shell' && extendedStore.render_level_shell) {
-          // Shell mode: hollow walls only
-          console.log(`[Viewer3D] Calling store.render_level_shell(${levelId}, ${wallThickness})`);
-          const wasmMesh = extendedStore.render_level_shell(levelId, wallThickness);
-          console.log(`[Viewer3D] Got shell mesh for ${levelId}:`, {
-            positions: wasmMesh.positions.length,
-            indices: wasmMesh.indices.length,
-          });
-          const geometry = WasmGeometryLoader.load(wasmMesh);
-          newMeshes.push({
-            levelId,
-            geometry,
-            color: LEVEL_COLORS[i % LEVEL_COLORS.length],
-          });
-          console.log(`[Viewer3D] Successfully rendered shell for level ${levelId}`);
 
-        } else if (renderMode === 'combined' && extendedStore.render_level_combined) {
-          // Combined mode: shell + room floor plates
-          console.log(`[Viewer3D] Calling store.render_level_combined(${levelId}, ${wallThickness})`);
-          const combined = extendedStore.render_level_combined(levelId, wallThickness);
-
-          // Render shell (walls)
-          console.log(`[Viewer3D] Got shell mesh for ${levelId}:`, {
-            positions: combined.shell.positions.length,
-            indices: combined.shell.indices.length,
-          });
-          const shellGeometry = WasmGeometryLoader.load(combined.shell);
-          newMeshes.push({
-            levelId,
-            geometry: shellGeometry,
-            color: LEVEL_COLORS[i % LEVEL_COLORS.length],
-          });
-
-          // Render room floor plates with different colors
-          console.log(`[Viewer3D] Got ${combined.rooms.length} room meshes for ${levelId}`);
-          combined.rooms.forEach((roomMesh, roomIndex) => {
-            const roomGeometry = WasmGeometryLoader.load(roomMesh);
-            newMeshes.push({
-              levelId: `${levelId}_room_${roomIndex}`,
-              geometry: roomGeometry,
-              color: ROOM_COLORS[roomIndex % ROOM_COLORS.length],
-            });
-          });
-          console.log(`[Viewer3D] Successfully rendered combined for level ${levelId}`);
-
-        } else {
-          // Solid mode (default, backward compatible) or fallback if new methods unavailable
-          console.log(`[Viewer3D] Calling store.render_level(${levelId})`);
-          const wasmMesh = store.render_level(levelId);
-          console.log(`[Viewer3D] Got mesh for ${levelId}:`, {
-            positions: wasmMesh.positions.length,
-            indices: wasmMesh.indices.length,
-          });
-          const geometry = WasmGeometryLoader.load(wasmMesh);
-          newMeshes.push({
-            levelId,
-            geometry,
-            color: LEVEL_COLORS[i % LEVEL_COLORS.length],
-          });
-          console.log(`[Viewer3D] Successfully rendered level ${levelId}`);
+      if (renderMode === 'shell') {
+        if (!extendedStore.render_level_shell) {
+          console.error(
+            `[Viewer3D] render_level_shell is not available on WasmStore; cannot render shell mode for level ${levelId}`
+          );
+          continue;
         }
-      } catch (e) {
-        console.warn(`[Viewer3D] Failed to render level ${levelId} in ${renderMode} mode:`, e);
-        // Fallback to solid rendering if shell/combined fails
-        if (renderMode !== 'solid') {
-          console.log(`[Viewer3D] Falling back to solid rendering for ${levelId}`);
-          try {
-            const wasmMesh = store.render_level(levelId);
-            const geometry = WasmGeometryLoader.load(wasmMesh);
-            newMeshes.push({
-              levelId,
-              geometry,
-              color: LEVEL_COLORS[i % LEVEL_COLORS.length],
-            });
-            console.log(`[Viewer3D] Fallback succeeded for ${levelId}`);
-          } catch (fallbackError) {
-            console.warn(`[Viewer3D] Fallback also failed for ${levelId}:`, fallbackError);
-          }
-        }
+
+        const wasmMesh = extendedStore.render_level_shell(levelId, wallThickness);
+        const geometry = WasmGeometryLoader.load(wasmMesh);
+        newMeshes.push({
+          levelId,
+          geometry,
+          color: LEVEL_COLORS[i % LEVEL_COLORS.length],
+        });
+        continue;
       }
+
+      if (renderMode === 'combined') {
+        if (!extendedStore.render_level_combined) {
+          console.error(
+            `[Viewer3D] render_level_combined is not available on WasmStore; cannot render combined mode for level ${levelId}`
+          );
+          continue;
+        }
+
+        const combined = extendedStore.render_level_combined(levelId, wallThickness);
+
+        // Require a valid shell; if missing, treat as a hard failure for this level.
+        if (!combined.shell) {
+          console.error(
+            `[Viewer3D] Combined render for level ${levelId} did not return a shell mesh; skipping level`
+          );
+          continue;
+        }
+
+        const shellGeometry = WasmGeometryLoader.load(combined.shell);
+        newMeshes.push({
+          levelId,
+          geometry: shellGeometry,
+          color: LEVEL_COLORS[i % LEVEL_COLORS.length],
+        });
+
+        combined.rooms.forEach((roomMesh, roomIndex) => {
+          const roomGeometry = WasmGeometryLoader.load(roomMesh);
+          newMeshes.push({
+            levelId: `${levelId}_room_${roomIndex}`,
+            geometry: roomGeometry,
+            color: ROOM_COLORS[roomIndex % ROOM_COLORS.length],
+          });
+        });
+
+        continue;
+      }
+
+      // Solid mode (explicit) – no fallbacks from other modes
+      const wasmMesh = store.render_level(levelId);
+      const geometry = WasmGeometryLoader.load(wasmMesh);
+      newMeshes.push({
+        levelId,
+        geometry,
+        color: LEVEL_COLORS[i % LEVEL_COLORS.length],
+      });
     }
 
     setLevelMeshes(newMeshes);

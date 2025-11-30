@@ -181,6 +181,136 @@ export interface LayoutSummary {
 }
 
 // ============================================================================
+// Systems, Components & Quantities (for MEP + Takeoffs)
+// ============================================================================
+
+/**
+ * High-level category of a physical component instance.
+ * This is intentionally coarse so the LLM can filter quickly
+ * without knowing every product family.
+ */
+export type ComponentCategory =
+  | 'architecture'
+  | 'structure'
+  | 'plumbing'
+  | 'electrical'
+  | 'hvac'
+  | 'low_voltage'
+  | 'finish'
+  | 'other';
+
+/**
+ * Type of building system. Individual components will reference
+ * a system where appropriate (e.g., a pipe belongs to a plumbing
+ * supply system and an electrical cable to a branch circuit).
+ */
+export type SystemType =
+  | 'plumbing_supply'
+  | 'plumbing_drain'
+  | 'plumbing_vent'
+  | 'electrical_branch'
+  | 'electrical_feeder'
+  | 'electrical_panel'
+  | 'hvac_supply'
+  | 'hvac_return'
+  | 'hvac_exhaust'
+  | 'ventilation'
+  | 'other';
+
+/**
+ * Summary of a building system (e.g., a plumbing zone, an electrical
+ * branch circuit, or an HVAC distribution tree).
+ *
+ * These are higher-level groupings that can be used for:
+ * - trade‑specific views (P/E/M sheets)
+ * - load and coverage checks
+ * - navigation ("show all rooms served by this air handler")
+ */
+export interface SystemSummary {
+  /** Stable system ID (owned by WASM store) */
+  id: string;
+  /** System type (plumbing, electrical, hvac, etc.) */
+  type: SystemType;
+  /** Human‑readable name (e.g., "Bath Group 1", "Kitchen Small Appliance Circuit A") */
+  name: string;
+  /** Primary building / level this system belongs to (if applicable) */
+  buildingId?: BuildingId | null;
+  levelId?: LevelId | null;
+  /** Rooms or spaces this system serves */
+  servedRooms: RoomId[];
+}
+
+/**
+ * Summary of a single physical component instance that may contribute
+ * to material takeoffs and trade coordination:
+ *
+ * - architectural: doors, windows, cabinets
+ * - structural: studs, beams, joists
+ * - plumbing: pipe segments, fittings, fixtures
+ * - electrical: conductors, receptacles, panels
+ * - hvac: ducts, diffusers, equipment
+ */
+export interface ComponentInstanceSummary {
+  /** Stable instance ID (from WASM store or CAD3D model) */
+  id: string;
+  /** Optional link to a higher‑level system (e.g., a branch circuit or zone) */
+  systemId?: string | null;
+  /** Category for quick filtering */
+  category: ComponentCategory;
+  /** Trade code or discipline (e.g., "P", "E", "M", "A", "S") */
+  trade?: string;
+  /** Specification / catalog reference (e.g., wall assembly, pipe type, fixture family) */
+  specId?: string;
+  /** Which building / level this instance lives on */
+  buildingId?: BuildingId | null;
+  levelId?: LevelId | null;
+  /** Approximate 2D location for maps and callouts (center of instance) */
+  center?: Point2D;
+  /** Optional 2D bounds if known */
+  bounds2D?: BoundingBox2D;
+  /** Primary quantity for takeoffs (e.g., length in feet, area in sqft, count=1) */
+  quantity?: {
+    kind: 'count' | 'length' | 'area' | 'volume';
+    value: number;
+    unit: string; // "ft", "sqft", "cf", etc.
+  };
+}
+
+/**
+ * Aggregated quantity row used for schedules and takeoff tables.
+ * This is a lossy roll‑up built from component instances but is
+ * significantly easier for LLMs and humans to reason about.
+ */
+export interface QuantitySummaryRow {
+  /** Category / trade grouping (e.g., "plumbing", "electrical") */
+  category: ComponentCategory;
+  /** Optional spec or family identifier (e.g., "2x6_EXT_STUD_WALL") */
+  specId?: string;
+  /** Optional system identifier (e.g., branch circuit ID) */
+  systemId?: string;
+  /** Human‑readable label for tables */
+  label: string;
+  /** Total quantity for this row */
+  quantity: {
+    kind: 'count' | 'length' | 'area' | 'volume';
+    value: number;
+    unit: string;
+  };
+}
+
+/**
+ * Slice of the canonical model focused on systems, components and
+ * roll‑up quantities. Initially this will be empty, but the shape
+ * lets us introduce MEP and structural detail incrementally without
+ * breaking the observable state contract.
+ */
+export interface SystemsState {
+  systems: SystemSummary[];
+  components: ComponentInstanceSummary[];
+  quantities: QuantitySummaryRow[];
+}
+
+// ============================================================================
 // Action Result Types
 // ============================================================================
 
@@ -251,6 +381,17 @@ export interface ObservableState {
     levelId: LevelId | null;
     units: UnitSystem;
   };
+
+  /**
+   * Systems, component instances and aggregated quantities used for:
+   * - trade‑specific views (P/E/M sheets)
+   * - material takeoffs and schedules
+   * - future code and standards checks
+   *
+   * NOTE: In early versions this will often be empty; the schema is
+   * intentionally forward‑looking to support more detailed modeling.
+   */
+  systems: SystemsState;
 }
 
 // ============================================================================
@@ -660,6 +801,11 @@ export function createEmptyState(): ObservableState {
       levelId: null,
       units: 'imperial',
     },
+    systems: {
+      systems: [],
+      components: [],
+      quantities: [],
+    },
   };
 }
 
@@ -1021,6 +1167,35 @@ export function formatStateForLLM(state: ObservableState): string {
     lines.push('SATISFIED:');
     for (const s of state.constraints.satisfied) {
       lines.push(`  [OK] ${s}`);
+    }
+  }
+
+  // High-level systems and quantities (if present)
+  if (state.systems.systems.length > 0 || state.systems.quantities.length > 0) {
+    lines.push('');
+    lines.push('=== SYSTEMS & QUANTITIES ===');
+
+    if (state.systems.systems.length > 0) {
+      lines.push('Systems:');
+      for (const sys of state.systems.systems.slice(0, 12)) {
+        const served = sys.servedRooms.length > 0 ? `serves ${sys.servedRooms.length} room(s)` : 'no rooms linked yet';
+        lines.push(`  - [${sys.type}] ${sys.name} (${served})`);
+      }
+      if (state.systems.systems.length > 12) {
+        lines.push(`  ... +${state.systems.systems.length - 12} more systems`);
+      }
+    }
+
+    if (state.systems.quantities.length > 0) {
+      lines.push('Quantities (roll‑up):');
+      for (const row of state.systems.quantities.slice(0, 16)) {
+        lines.push(
+          `  - [${row.category}] ${row.label}: ${row.quantity.value.toFixed(2)} ${row.quantity.unit}`
+        );
+      }
+      if (state.systems.quantities.length > 16) {
+        lines.push(`  ... +${state.systems.quantities.length - 16} more quantity rows`);
+      }
     }
   }
 

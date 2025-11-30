@@ -208,6 +208,25 @@ export function ChatPanelHybrid({ onLevelIdsChange }: ChatPanelHybridProps) {
     ? extractConstraints(result.toolCallHistory)
     : { violations: [], warnings: [], satisfied: [] };
 
+  // Persist the latest LLM-friendly observable state to localStorage so that
+  // the CAD3D lab page can reconstruct a 3D model of the last generation.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!result || !result.toolCallHistory || result.toolCallHistory.length === 0) return;
+
+    const latest = result.toolCallHistory[result.toolCallHistory.length - 1]?.result;
+    const llmState = latest?.llmState;
+    if (!llmState) return;
+
+    try {
+      window.localStorage.setItem('cad3d:last_llm_state', JSON.stringify(llmState));
+    } catch (e) {
+      // Non-fatal; CAD3D lab will fall back to a demo model if this fails.
+      // eslint-disable-next-line no-console
+      console.warn('[CAD3D] Failed to persist llmState to localStorage', e);
+    }
+  }, [result]);
+
   return (
     <div className="flex flex-col h-full bg-gray-900 text-gray-100">
       {/* Header */}
