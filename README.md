@@ -5,8 +5,8 @@ The stack is built around a **Rust geometry/logic core** with a web frontend and
 
 ### High-Level Architecture
 
-- **Frontend** (`packages/frontend`)
-  - Next.js + React + Three.js.
+- **Frontend** (`packages/frontend-svelte`)
+  - SvelteKit + Svelte 5 + Three.js (Threlte).
   - Loads the **WASM module** to run the CAD engine directly in the browser.
   - Renders 3D geometry using shared memory buffers from WASM.
 
@@ -20,7 +20,7 @@ The stack is built around a **Rust geometry/logic core** with a web frontend and
   - Handles data marshalling and mesh generation for the frontend.
 
 - **AI Worker (Python)** (`packages/ai-worker`)
-  - Python + LangChain + Gemini.
+  - Python + LangChain + Gemini 3.0 Pro.
   - Orchestrates design tasks and generates Rhai scripts.
 
 ---
@@ -40,11 +40,11 @@ wasm-pack build --target web
 
 #### Run Frontend
 ```bash
-cd packages/frontend
+cd packages/frontend-svelte
 npm install
 npm run dev
 ```
-Open `http://localhost:3000`. The app will load the compiled WASM module.
+Open `http://localhost:5173`. The app will load the compiled WASM module.
 
 ### Roadmap
 See `docs/architecture.md` for the detailed Client-Side WASM architecture.

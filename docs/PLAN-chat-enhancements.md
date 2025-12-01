@@ -12,9 +12,9 @@
 ### Current Architecture
 
 **Files involved:**
-- `ChatPanelHybrid.tsx` - UI component with Generate button
-- `useGeminiCAD.ts` - Hook managing generation loop
-- `api/ai/chat/route.ts` - Server proxy to Gemini API
+- `ChatPanel.svelte` - UI component with Generate button
+- `gemini-cad.svelte.ts` - Svelte store managing generation loop
+- `api/ai/chat/+server.ts` - SvelteKit server route to Gemini API
 
 **Current flow:**
 1. User clicks "Generate" → `handleGenerate()` → `generate(prompt)`
@@ -29,7 +29,7 @@
 ```typescript
 config: {
   thinkingConfig: {
-    thinkingBudget: 32768,  // Already have this
+    thinkingLevel: 'high',  // 'low' | 'medium' | 'high'
     includeThoughts: true   // ADD THIS
   }
 }
@@ -59,14 +59,14 @@ response.usageMetadata = {
 
 **Changes:**
 
-A) `useGeminiCAD.ts`:
+A) `gemini-cad.svelte.ts`:
 ```typescript
-// Add ref to track abort controller
-const abortControllerRef = useRef<AbortController | null>(null);
+// Add variable to track abort controller
+let abortController: AbortController | null = $state(null);
 
 // In generate():
-abortControllerRef.current = new AbortController();
-const signal = abortControllerRef.current.signal;
+abortController = new AbortController();
+const signal = abortController.signal;
 
 // Check signal in loop
 while (currentIteration < maxIterations) {
@@ -78,25 +78,27 @@ while (currentIteration < maxIterations) {
 }
 
 // Add cancel function
-const cancel = useCallback(() => {
-  abortControllerRef.current?.abort();
-  setGenerating(false);
-}, []);
+function cancel() {
+  abortController?.abort();
+  generating = false;
+}
 
-// Return cancel from hook
+// Export from store
 return { generate, cancel, ... };
 ```
 
-B) `ChatPanelHybrid.tsx`:
-```typescript
-const { generate, cancel, ... } = useGeminiCAD();
+B) `ChatPanel.svelte`:
+```svelte
+<script lang="ts">
+  const { generate, cancel, generating } = geminiCadStore;
+</script>
 
-// In controls section, conditionally show Cancel button during generation
-{generating && (
-  <button onClick={handleCancel} className="bg-red-600 hover:bg-red-500">
+<!-- In controls section, conditionally show Cancel button during generation -->
+{#if $generating}
+  <button onclick={cancel} class="bg-red-600 hover:bg-red-500">
     Cancel
   </button>
-)}
+{/if}
 ```
 
 C) Add "Clear Results" or change Reset to work better:
@@ -113,13 +115,13 @@ C) Add "Clear Results" or change Reset to work better:
 
 **Changes:**
 
-A) `api/ai/chat/route.ts`:
+A) `api/ai/chat/+server.ts`:
 ```typescript
 // Update config
 config: {
   thinkingConfig: {
-    thinkingBudget: 32768,
-    includeThoughts: true  // ADD
+    thinkingLevel: 'high',  // 'low' | 'medium' | 'high'
+    includeThoughts: true   // ADD
   },
 }
 
@@ -133,7 +135,7 @@ for (const part of rawParts) {
 }
 
 // Add to response
-return NextResponse.json({
+return json({
   success: true,
   text: response.text || undefined,
   thinking: thinkingSummary,  // ADD
@@ -144,40 +146,40 @@ return NextResponse.json({
 
 B) Update `ChatResponse` interface in both files to include `thinking?: string`
 
-C) `useGeminiCAD.ts`:
+C) `gemini-cad.svelte.ts`:
 ```typescript
 // Track thinking outputs per iteration
-const thinkingOutputsRef = useRef<string[]>([]);
+let thinkingOutputs: string[] = $state([]);
 
 // In loop, capture thinking
 if (chatResponse.thinking) {
-  thinkingOutputsRef.current.push(chatResponse.thinking);
+  thinkingOutputs = [...thinkingOutputs, chatResponse.thinking];
 }
 
 // Add to partial result so UI can display live
 const partialResult: GenerationResult = {
   ...
-  thinkingOutputs: [...thinkingOutputsRef.current],
+  thinkingOutputs: thinkingOutputs,
 };
 ```
 
-D) `ChatPanelHybrid.tsx`:
-```typescript
-// Display thinking in collapsible section
-{result?.thinkingOutputs?.length > 0 && (
-  <details className="bg-purple-900/20 border border-purple-700 rounded-lg p-4">
-    <summary className="cursor-pointer text-purple-300 font-semibold">
-      🧠 Gemini's Reasoning ({result.thinkingOutputs.length} steps)
+D) `ChatPanel.svelte`:
+```svelte
+<!-- Display thinking in collapsible section -->
+{#if result?.thinkingOutputs?.length > 0}
+  <details class="bg-purple-900/20 border border-purple-700 rounded-lg p-4">
+    <summary class="cursor-pointer text-purple-300 font-semibold">
+      Gemini's Reasoning ({result.thinkingOutputs.length} steps)
     </summary>
-    <div className="mt-3 space-y-2">
-      {result.thinkingOutputs.map((thought, i) => (
-        <div key={i} className="text-sm text-purple-200 whitespace-pre-wrap">
-          <span className="text-purple-400">Step {i+1}:</span> {thought}
+    <div class="mt-3 space-y-2">
+      {#each result.thinkingOutputs as thought, i}
+        <div class="text-sm text-purple-200 whitespace-pre-wrap">
+          <span class="text-purple-400">Step {i+1}:</span> {thought}
         </div>
-      ))}
+      {/each}
     </div>
   </details>
-)}
+{/if}
 ```
 
 ---
@@ -190,12 +192,12 @@ D) `ChatPanelHybrid.tsx`:
 
 **Changes:**
 
-A) `api/ai/chat/route.ts`:
+A) `api/ai/chat/+server.ts`:
 ```typescript
 // Extract usage metadata
 const usageMetadata = response.usageMetadata;
 
-return NextResponse.json({
+return json({
   success: true,
   text: ...,
   thinking: ...,
@@ -209,7 +211,7 @@ return NextResponse.json({
 });
 ```
 
-B) `useGeminiCAD.ts`:
+B) `gemini-cad.svelte.ts`:
 ```typescript
 interface TokenUsage {
   promptTokens: number;
@@ -218,75 +220,72 @@ interface TokenUsage {
 }
 
 // Track per-step and cumulative
-const tokenUsageRef = useRef<{
-  steps: TokenUsage[];
-  cumulative: TokenUsage;
-}>({
-  steps: [],
-  cumulative: { promptTokens: 0, responseTokens: 0, totalTokens: 0 },
-});
+let tokenUsageSteps: TokenUsage[] = $state([]);
+let tokenUsageCumulative: TokenUsage = $state({ promptTokens: 0, responseTokens: 0, totalTokens: 0 });
 
 // In loop, accumulate usage
 if (chatResponse.usage) {
-  tokenUsageRef.current.steps.push(chatResponse.usage);
-  tokenUsageRef.current.cumulative.promptTokens += chatResponse.usage.promptTokens;
-  tokenUsageRef.current.cumulative.responseTokens += chatResponse.usage.responseTokens;
-  tokenUsageRef.current.cumulative.totalTokens += chatResponse.usage.totalTokens;
+  tokenUsageSteps = [...tokenUsageSteps, chatResponse.usage];
+  tokenUsageCumulative = {
+    promptTokens: tokenUsageCumulative.promptTokens + chatResponse.usage.promptTokens,
+    responseTokens: tokenUsageCumulative.responseTokens + chatResponse.usage.responseTokens,
+    totalTokens: tokenUsageCumulative.totalTokens + chatResponse.usage.totalTokens,
+  };
 }
 
 // Add to GenerationResult
 const generationResult: GenerationResult = {
   ...
   tokenUsage: {
-    steps: tokenUsageRef.current.steps,
-    cumulative: tokenUsageRef.current.cumulative,
+    steps: tokenUsageSteps,
+    cumulative: tokenUsageCumulative,
   },
 };
 ```
 
-C) `ChatPanelHybrid.tsx`:
-```typescript
-// Token usage summary card
-{result?.tokenUsage && (
-  <div className="p-4 bg-gray-800 rounded-lg">
-    <h3 className="text-sm font-semibold text-gray-300 mb-2">Token Usage</h3>
-    <div className="grid grid-cols-3 gap-4 text-center">
+C) `ChatPanel.svelte`:
+```svelte
+<!-- Token usage summary card -->
+{#if result?.tokenUsage}
+  <div class="p-4 bg-gray-800 rounded-lg">
+    <h3 class="text-sm font-semibold text-gray-300 mb-2">Token Usage</h3>
+    <div class="grid grid-cols-3 gap-4 text-center">
       <div>
-        <div className="text-2xl font-bold text-blue-400">
+        <div class="text-2xl font-bold text-blue-400">
           {result.tokenUsage.cumulative.promptTokens.toLocaleString()}
         </div>
-        <div className="text-xs text-gray-400">Input Tokens</div>
+        <div class="text-xs text-gray-400">Input Tokens</div>
       </div>
       <div>
-        <div className="text-2xl font-bold text-green-400">
+        <div class="text-2xl font-bold text-green-400">
           {result.tokenUsage.cumulative.responseTokens.toLocaleString()}
         </div>
-        <div className="text-xs text-gray-400">Output Tokens</div>
+        <div class="text-xs text-gray-400">Output Tokens</div>
       </div>
       <div>
-        <div className="text-2xl font-bold text-purple-400">
+        <div class="text-2xl font-bold text-purple-400">
           {result.tokenUsage.cumulative.totalTokens.toLocaleString()}
         </div>
-        <div className="text-xs text-gray-400">Total</div>
+        <div class="text-xs text-gray-400">Total</div>
       </div>
     </div>
 
-    {/* Per-step breakdown (collapsible) */}
-    <details className="mt-3">
-      <summary className="text-xs text-gray-400 cursor-pointer">
+    <!-- Per-step breakdown (collapsible) -->
+    <details class="mt-3">
+      <summary class="text-xs text-gray-400 cursor-pointer">
         Per-step breakdown ({result.tokenUsage.steps.length} API calls)
       </summary>
-      <div className="mt-2 text-xs space-y-1">
-        {result.tokenUsage.steps.map((step, i) => (
-          <div key={i} className="flex justify-between text-gray-400">
+      <div class="mt-2 text-xs space-y-1">
+        {#each result.tokenUsage.steps as step, i}
+          <div class="flex justify-between text-gray-400">
             <span>Step {i + 1}:</span>
             <span>{step.totalTokens} tokens</span>
           </div>
-        ))}
+        {/each}
       </div>
     </details>
   </div>
-)}
+{/if}
 ```
 
 ---
@@ -316,10 +315,10 @@ export interface GenerationResult {
 
 | File | Changes |
 |------|---------|
-| `api/ai/chat/route.ts` | Add `includeThoughts`, extract thinking text, extract usageMetadata |
-| `useGeminiCAD.ts` | Add AbortController, track thinking/tokens, add `cancel()` function |
-| `ChatPanelHybrid.tsx` | Add Cancel button, thinking display, token usage card |
-| `gemini-cad.ts` | Update GenerationResult interface |
+| `api/ai/chat/+server.ts` | Add `includeThoughts`, extract thinking text, extract usageMetadata |
+| `gemini-cad.svelte.ts` | Add AbortController, track thinking/tokens, add `cancel()` function |
+| `ChatPanel.svelte` | Add Cancel button, thinking display, token usage card |
+| `gemini-types.ts` | Update GenerationResult interface |
 
 ---
 

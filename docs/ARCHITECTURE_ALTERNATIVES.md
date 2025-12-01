@@ -144,7 +144,7 @@ panic = 'abort'
 
 #### 3. Add Streaming Compilation
 
-**Create `packages/frontend/lib/wasm-loader.ts`**:
+**Create `packages/frontend-svelte/src/lib/wasm-loader.ts`**:
 ```typescript
 let wasmModule: WebAssembly.Module | null = null;
 

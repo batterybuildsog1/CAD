@@ -23,16 +23,16 @@ The bridge between Rust and the Browser.
 -   **Memory Management:** Handles the transfer of large binary data (meshes) using `Float32Array` views to minimize copying.
 -   **Render Loop:** Generates tessellated meshes from Truck BREPs for rendering.
 
-### 3. Frontend (Next.js + React Three Fiber)
+### 3. Frontend (SvelteKit + Threlte)
 The user interface and visualization layer.
--   **UI:** React components for the project tree, property editors, and script editor.
--   **Visualization:** `@react-three/fiber` renders the mesh data received from the WASM module.
+-   **UI:** Svelte 5 components for the project tree, property editors, and script editor.
+-   **Visualization:** Threlte (Svelte Three.js wrapper) renders the mesh data received from the WASM module.
 -   **State Sync:** Maintains a lightweight sync of the WASM store state for UI rendering.
 
 ## Data Flow
 
 1.  **User Action:** User drags a wall in the 3D view.
-2.  **JS Event:** React captures the input.
+2.  **JS Event:** Svelte captures the input.
 3.  **WASM Call:** JS calls `wasm_module.update_wall(id, new_position)`.
 4.  **Rust Update:**
     -   `geometry-core` updates the `Wall` entity.
@@ -48,7 +48,7 @@ The user interface and visualization layer.
 -   **CAD Kernel:** Truck (B-Rep / NURBS)
 -   **Scripting:** Rhai
 -   **WASM Tooling:** `wasm-bindgen`, `wasm-pack`
--   **Frontend:** TypeScript, Next.js, React Three Fiber, TailwindCSS
+-   **Frontend:** TypeScript, SvelteKit, Svelte 5, Threlte, TailwindCSS
 
 ## Visualization & Accuracy Strategy
 
@@ -60,7 +60,7 @@ We treat graphics fidelity as a *stepped pipeline* built on a single canonical b
   - Purpose: rapid iteration with Gemini and the user.
   - Views:
     - 2D floor plans rendered from `ObservableState` / `llmState` (rooms, walls, circulation).
-    - 3D massing / shells rendered via the WASM CAD kernel + WebGL (react-three-fiber).
+    - 3D massing / shells rendered via the WASM CAD kernel + WebGL (Threlte).
   - Characteristics:
     - Stylized, high-contrast, “diagrammatic” visuals.
     - Always synchronized with the latest LLM-driven geometry and constraints.
@@ -177,7 +177,7 @@ The Rust/WASM store remains the **authoritative geometric model**, while `observ
 packages/
   geometry-core/    # Pure Rust logic (no I/O)
   geometry-wasm/    # WASM bindings
-  frontend/         # Next.js application
+  frontend-svelte/  # SvelteKit application
 ```
 
 ## Implementation Phases
@@ -188,7 +188,7 @@ packages/
 - Create `geometry-wasm` crate with `wasm-bindgen` setup.
 
 ### Phase 2: Frontend Integration
-- Configure Vite/Next.js for WASM loading.
+- Configure Vite/SvelteKit for WASM loading.
 - Implement direct WASM calls for geometry updates.
 - Render 3D meshes from shared memory buffers.
 
@@ -391,35 +391,172 @@ Replaced area-only calculation with geometry-aware connected hallway network.
 - `components/LoggerProvider.tsx` - Console interceptor
 - Export API: `GET /api/logs/export?sessionId=xxx`
 
-### Phase 8: CAD3D Experimental Model & Lab (IN PROGRESS)
+### Phase 8: CAD3D Model, Lab & Workspace Integration (IN PROGRESS)
 
 To prepare for a full SketchUp/Revit-style experience, we introduced a **CAD3D
-experimental subtree** that lives alongside the main Next.js app without
-changing existing behavior.
+subtree** that defines a rich 3D model (`Cad3DModel`) for the house:
 
-- Location: `packages/frontend/src/cad3d/`
-- Entry page: `app/cad-lab/page.tsx` (navigate to `/cad-lab` in dev)
-- Purpose:
-  - Define a rich 3D model (`Cad3DModel`) with:
+- Location: `packages/frontend-svelte/src/lib/cad3d/`
+- Lab entry page: `app/cad-lab/page.tsx` (navigate to `/cad-lab` in dev)
+- Model contents:
     - Layout elements: rooms, walls, slabs, roofs
     - Structural elements: studs, plates, sheathing panels
     - Openings: windows, doors
     - MEP placeholders: pipes, ducts, conduits, fixtures
-  - Provide spec registries for future performance modeling:
+- Spec registries for future performance modeling:
     - `MaterialSpec`, `WindowSpec`, `DoorSpec`
     - `WallAssemblySpec`, `RoofAssemblySpec`, `SlabAssemblySpec`
   - Seed a CAD Lab scene for visual experiments (one room + a row of studs).
 
-This tree is intentionally isolated:
+Originally this tree was isolated (only `/cad-lab` used it). As of the CAD
+workspace unification work:
 
-- No existing workspace routes import from `cad3d/` (only `/cad-lab`).
-- Circulation and pathfinding modules are not wired into CAD3D yet.
-- The CAD Lab can read the last Gemini `llmState` from `localStorage`
-  (`cad3d:last_llm_state`), convert it to a `Cad3DModel` via
-  `cad3d/conversion.ts`, and render a 3D preview of the current floorplan
-  without affecting the main WASM-based viewer.
-- It acts as a "git feature branch in the filesystem" that can be merged into
-  the main UX once tested and validated.
+- The main CAD workspace exposes a **`viewer3d_cad` view mode** which renders
+  `Cad3DModel` via `CadLabCanvas` directly in the primary UI.
+- `ChatPanelHybrid` persists the latest `llmState` (`ObservableState`) and
+  passes it through `cad3d/conversion.ts` → `Cad3DModel` so the CAD3D view
+  stays in sync with the same canonical state Gemini uses.
+- The `/cad-lab` route remains as a safe playground for new CAD3D ideas, but
+  the **authoritative CAD experience is the unified workspace at `/`**.
 
+Circulation and pathfinding logic are still wired primarily to
+`observable-state.ts` and the WASM engine; deeper integration with CAD3D
+visuals will happen in later phases.
 
+### Phase 9: Unified Workspace & View Model (PLANNED)
 
+Goal: **one canonical CAD workspace** with a single view model that keeps
+2D, WASM 3D, and CAD3D perfectly in sync for both humans and Gemini.
+
+- Collapse legacy routes:
+  - Treat `app/page.tsx` (`/`) as the only real workspace entry.
+  - Remove the old `/workspace` page (`app/workspace/page.tsx`) entirely to
+    avoid duplicate implementations of the workspace UI.
+- Extract a shared `WorkspaceLayout`:
+  - Encapsulate:
+    - Left: `ChatPanelHybrid` (Gemini + WASM execution, observable state).
+    - Right: 3D panel with:
+      - 3D WASM view (`Viewer3D`) for `viewer3d_solid` / `viewer3d_shell` /
+        `viewer3d_combined`.
+      - CAD3D view (`CadLabCanvas`) for `viewer3d_cad`.
+    - Shared view state:
+      - `ViewMode` (`floorplan_2d`, `viewer3d_*`, `viewer3d_cad`).
+      - Level + room selection.
+      - Overlays (`circulation`, `room_types`, `code_violations`, etc.).
+  - Make `WorkspaceLayout` the **single place** that owns and updates this
+    view state, whether changes come from:
+    - User UI actions (toolbar, clicks in 2D/3D).
+    - Gemini tools (`set_active_view`, `focus_on_entities`,
+      `set_overlay_state`, `request_view_snapshot`).
+- Guarantee view consistency:
+  - Every geometry‑changing tool call updates:
+    - Rust/WASM store (kernel truth).
+    - `ObservableState` / `llmState` (LLM projection).
+    - CAD3D model (via `buildCadModelFromObservableState`).
+  - All viewers (floor plan, WASM 3D, CAD3D) **only** consume these shared
+    projections; no component maintains its own hidden notion of what exists.
+
+### Phase 10: CAD Editor Visual & UX Redesign (PLANNED)
+
+Goal: Make the editor feel like a **serious CAD tool**, not a toy, while
+staying performant and LLM‑friendly.
+
+- Define a workspace design system:
+  - Color palette:
+    - Background: deep, neutral dark.
+    - Grid: subtle cool grays.
+    - Shell/walls: cool neutral grays (exterior vs interior).
+    - Rooms: muted but distinct colors by type.
+    - Overlays: clear accent colors for circulation, violations, selections.
+  - Typography:
+    - Titles / section headers.
+    - Numeric labels (areas, dimensions).
+    - Monospace for IDs and tool names.
+  - Spacing and density:
+    - Consistent paddings, margins, and card layouts across the workspace.
+- 2D Floor Plan visual upgrade:
+  - Walls:
+    - Draw explicit wall outlines with line weight differences:
+      - Exterior vs interior.
+    - Optional hatching for certain wall types (garage, exterior).
+  - Rooms:
+    - Lower‑opacity fills so grid and wall edges remain visible.
+    - Stronger strokes and labels for selected rooms.
+  - Hallways & circulation:
+    - Distinct visual style for `hallway` rooms (thin pink spines).
+    - Optional circulation overlay that draws paths from entry to rooms.
+  - Annotations:
+    - Room name + area (and basic dimensions for rectangles).
+    - Legend explaining colors, overlays, and scale.
+- 3D (WASM & CAD3D) visual upgrade:
+  - Lighting:
+    - Standard three‑light rig (ambient, key, fill) tuned for clarity.
+  - Materials:
+    - Shell/walls: neutral gray, slightly rough, double‑sided.
+    - Slabs: darker, matte base.
+    - Rooms: translucent colored plates in combined/CAD3D modes.
+    - Structural elements (studs, slabs): distinct but not overwhelming.
+  - Overlays:
+    - Circulation paths drawn as subtle floor overlays in 3D.
+    - Code violations highlighted as 3D markers.
+  - Interaction:
+    - Consistent selection highlights for rooms/levels across 2D and 3D.
+
+### Phase 11: Circulation, Hallways & Openings Integration (PLANNED)
+
+Goal: Ensure **hallways and circulation are real geometry**, consistently
+visible in 2D, WASM 3D and CAD3D, and that doors/windows are integrated into
+both the model and the visuals.
+
+- Hallways as first‑class rooms:
+  - Guarantee that circulation experts (`skill_create_hallway_expert`,
+    spine/graph/MST pipeline) ultimately emit **room geometry**:
+    - Each hallway or corridor represented as a `RoomSummary` with
+      `room_type: 'hallway'` and a valid polygon.
+  - Ensure WASM engine creates matching hallway rooms, not just abstract
+    graph edges, so all three layers stay synchronized:
+    - Rust/WASM store (create_room).
+    - `ObservableState.floorplan.rooms`.
+    - CAD3D `RoomElement`s (via conversion).
+- Non‑hall circulation:
+  - Represent open circulation (e.g., through living/dining) via:
+    - `layout.circulation` entries with path metadata.
+    - Overlays in:
+      - 2D: dashed polylines across floor plan.
+      - 3D: subtle floor ribbons or arrows.
+- Hallway and room sizing semantics:
+  - Encode explicit sizing rules:
+    - Hallway width ranges (e.g., 3′–4′) differentiated by template tier.
+    - Room size targets per type from `space-budget.ts`.
+  - Connect these rules to:
+    - Skill parameters and defaults.
+    - Constraint validation (warnings when out of range).
+    - Success criteria in prompts (e.g. “hallways meet minimum width”).
+- Doors and windows:
+  - Standardize when openings are added:
+    - After rooms + halls + shell are established.
+    - Use circulation graph and adjacencies to pick which walls receive
+      doors and windows.
+  - Use `add_opening` consistently:
+    - Map each `OpeningSummary` (`wallId`, `opening_type`, `position`,
+      `width`, `height`, `sill_height`) into:
+      - Accurate WASM geometry.
+      - CAD3D `WindowElement` / `DoorElement` attached to `WallElement`.
+  - Visual representation:
+    - 2D:
+      - Door swings drawn on walls.
+      - Windows as thin wall segments or symbols.
+    - 3D:
+      - Simple extruded frames or cutouts so openings are clearly visible.
+  - Validation:
+    - Add optional “opening validation” pass:
+      - Egress requirements (bedroom windows, exit doors).
+      - Reasonable glazed area per room type.
+
+Together, Phases 9–11 move the system from a set of powerful but partially
+disconnected views to a **single, coherent CAD workspace** where:
+
+- Gemini, WASM and humans all operate on the same canonical model.
+- 2D, WASM 3D and CAD3D visuals are aligned and expressive.
+- Circulation, hallways, doors and windows are first‑class, visible parts of
+  the design rather than hidden implementation details.

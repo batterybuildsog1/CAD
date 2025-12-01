@@ -39,9 +39,12 @@ impl WasmMesh {
     }
 }
 
+use std::cell::Cell;
+
 #[wasm_bindgen]
 pub struct WasmStore {
     inner: SharedStore,
+    mutation_count: Cell<u64>,
 }
 
 #[wasm_bindgen]
@@ -50,13 +53,20 @@ impl WasmStore {
     pub fn new() -> Self {
         Self {
             inner: new_shared_store(),
+            mutation_count: Cell::new(0),
         }
+    }
+
+    /// Increment mutation count (called after successful mutations)
+    fn bump_mutation_count(&self) {
+        self.mutation_count.set(self.mutation_count.get() + 1);
     }
 
     pub fn create_project(&self, name: &str) -> Result<String, JsValue> {
         let mut store = self.inner.write().map_err(|_| "Failed to acquire write lock")?;
         let id = store.create_project(name, UnitSystem::Imperial, CodeRegion::us_irc_2021())
             .map_err(|e| e.to_string())?;
+        self.bump_mutation_count();
         Ok(id.to_string())
     }
 
@@ -100,6 +110,7 @@ impl WasmStore {
         let building_id = store.add_building(project_id, name)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
+        self.bump_mutation_count();
         Ok(building_id.to_string())
     }
 
@@ -120,6 +131,7 @@ impl WasmStore {
         let level_id = store.add_level(building_id, name, elevation, floor_to_floor)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
+        self.bump_mutation_count();
         Ok(level_id.to_string())
     }
 
@@ -147,6 +159,7 @@ impl WasmStore {
         let footprint_id = store.set_level_footprint(level_id, polygon)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
+        self.bump_mutation_count();
         Ok(footprint_id.to_string())
     }
 
@@ -182,6 +195,7 @@ impl WasmStore {
         let footprint_id = store.set_level_footprint(level_id, polygon)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
+        self.bump_mutation_count();
         Ok(footprint_id.to_string())
     }
 
@@ -196,6 +210,7 @@ impl WasmStore {
         let assembly_id = store.create_wall_assembly(name, layers)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
+        self.bump_mutation_count();
         Ok(assembly_id.to_string())
     }
 
@@ -235,6 +250,7 @@ impl WasmStore {
         let wall_id = store.create_wall(level_id, assembly_id, start_point, end_point, height)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
+        self.bump_mutation_count();
         Ok(wall_id.to_string())
     }
 
@@ -275,6 +291,7 @@ impl WasmStore {
         let room_id = store.create_room(level_id, room_type, name, boundary)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
+        self.bump_mutation_count();
         Ok(room_id.to_string())
     }
 
@@ -474,7 +491,9 @@ impl WasmStore {
             .map_err(|_| JsValue::from_str("Failed to acquire write lock"))?;
 
         store.remove_building(building_id)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.bump_mutation_count();
+        Ok(())
     }
 
     /// Remove a level (cascades to remove footprint)
@@ -486,7 +505,9 @@ impl WasmStore {
             .map_err(|_| JsValue::from_str("Failed to acquire write lock"))?;
 
         store.remove_level(level_id)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.bump_mutation_count();
+        Ok(())
     }
 
     /// Offset a footprint by a distance
@@ -498,7 +519,9 @@ impl WasmStore {
             .map_err(|_| JsValue::from_str("Failed to acquire write lock"))?;
 
         store.offset_footprint(footprint_id, distance)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.bump_mutation_count();
+        Ok(())
     }
 
     /// Remove a wall (cascades to remove all openings)
@@ -510,7 +533,9 @@ impl WasmStore {
             .map_err(|_| JsValue::from_str("Failed to acquire write lock"))?;
 
         store.remove_wall(wall_id)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.bump_mutation_count();
+        Ok(())
     }
 
     /// Get the current state as a JS object with entity counts
@@ -593,6 +618,7 @@ impl WasmStore {
             sill_height,
         ).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
+        self.bump_mutation_count();
         Ok(opening_id.to_string())
     }
 
@@ -621,7 +647,9 @@ impl WasmStore {
             .map_err(|_| JsValue::from_str("Failed to acquire write lock"))?;
 
         store.remove_opening(opening_id)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.bump_mutation_count();
+        Ok(())
     }
 
     // ============ GRID OPERATIONS ============
@@ -635,7 +663,9 @@ impl WasmStore {
             .map_err(|_| JsValue::from_str("Failed to acquire write lock"))?;
 
         store.create_grid(building_id)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.bump_mutation_count();
+        Ok(())
     }
 
     /// Add a grid axis to a building's grid
@@ -667,7 +697,9 @@ impl WasmStore {
             .map_err(|_| JsValue::from_str("Failed to acquire write lock"))?;
 
         store.add_grid_axis(building_id, axis)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.bump_mutation_count();
+        Ok(())
     }
 
     // ============ SHELL AND ROOM RENDERING ============
@@ -849,6 +881,324 @@ impl WasmStore {
 
         Ok(result.into())
     }
+
+    // ============ STATE DERIVATION QUERY METHODS ============
+
+    /// Get all rooms for a level with full details for state derivation
+    /// Returns serialized array of RoomSummary objects
+    pub fn get_level_rooms(&self, level_id: &str) -> JsValue {
+        let level_id = match LevelId::from_str(level_id) {
+            Ok(id) => id,
+            Err(_) => return JsValue::NULL,
+        };
+
+        let store = match self.inner.read() {
+            Ok(s) => s,
+            Err(_) => return JsValue::NULL,
+        };
+
+        let rooms = store.get_level_rooms(level_id);
+        let room_summaries: Vec<serde_json::Value> = rooms
+            .iter()
+            .map(|room| {
+                let centroid = room.boundary.centroid();
+                let bbox = compute_bounding_box(&room.boundary);
+                serde_json::json!({
+                    "id": room.id.to_string(),
+                    "name": room.name,
+                    "type": room.room_type.display_name(),
+                    "area": room.area(),
+                    "center": [centroid.x, centroid.y],
+                    "dimensions": {
+                        "width": bbox.0,
+                        "depth": bbox.1
+                    }
+                })
+            })
+            .collect();
+
+        serde_wasm_bindgen::to_value(&room_summaries).unwrap_or(JsValue::NULL)
+    }
+
+    /// Get all walls for a level with full details for state derivation
+    /// Returns serialized array of WallSummary objects
+    #[wasm_bindgen(js_name = "get_level_walls")]
+    pub fn get_level_walls_wasm(&self, level_id: &str) -> JsValue {
+        let level_id = match LevelId::from_str(level_id) {
+            Ok(id) => id,
+            Err(_) => return JsValue::NULL,
+        };
+
+        let store = match self.inner.read() {
+            Ok(s) => s,
+            Err(_) => return JsValue::NULL,
+        };
+
+        let walls = store.get_level_walls(level_id);
+        let wall_summaries: Vec<serde_json::Value> = walls
+            .iter()
+            .map(|wall| {
+                // Get wall assembly thickness
+                let thickness = store
+                    .get_wall_assembly(wall.assembly_id)
+                    .map(|a| a.total_thickness / 12.0) // Convert inches to feet
+                    .unwrap_or(0.5);
+
+                serde_json::json!({
+                    "id": wall.id.to_string(),
+                    "start": [wall.start.x, wall.start.y],
+                    "end": [wall.end.x, wall.end.y],
+                    "thickness": thickness,
+                    "height": wall.height
+                })
+            })
+            .collect();
+
+        serde_wasm_bindgen::to_value(&wall_summaries).unwrap_or(JsValue::NULL)
+    }
+
+    /// Get complete observable state for LLM feedback
+    /// Returns the full state structure matching the TypeScript ObservableState interface
+    pub fn get_observable_state(&self, level_id: &str) -> JsValue {
+        let level_id_parsed = match LevelId::from_str(level_id) {
+            Ok(id) => id,
+            Err(_) => return JsValue::NULL,
+        };
+
+        let store = match self.inner.read() {
+            Ok(s) => s,
+            Err(_) => return JsValue::NULL,
+        };
+
+        // Get rooms
+        let rooms = store.get_level_rooms(level_id_parsed);
+        let room_summaries: Vec<serde_json::Value> = rooms
+            .iter()
+            .map(|room| {
+                let centroid = room.boundary.centroid();
+                let bbox = compute_bounding_box(&room.boundary);
+                serde_json::json!({
+                    "id": room.id.to_string(),
+                    "name": room.name,
+                    "type": room.room_type.display_name(),
+                    "area": room.area(),
+                    "center": [centroid.x, centroid.y],
+                    "dimensions": {
+                        "width": bbox.0,
+                        "depth": bbox.1
+                    }
+                })
+            })
+            .collect();
+
+        // Get walls
+        let walls = store.get_level_walls(level_id_parsed);
+        let wall_summaries: Vec<serde_json::Value> = walls
+            .iter()
+            .map(|wall| {
+                let thickness = store
+                    .get_wall_assembly(wall.assembly_id)
+                    .map(|a| a.total_thickness / 12.0)
+                    .unwrap_or(0.5);
+
+                serde_json::json!({
+                    "id": wall.id.to_string(),
+                    "start": [wall.start.x, wall.start.y],
+                    "end": [wall.end.x, wall.end.y],
+                    "thickness": thickness,
+                    "height": wall.height
+                })
+            })
+            .collect();
+
+        // Get openings (collect from all walls on this level)
+        let opening_summaries: Vec<serde_json::Value> = walls
+            .iter()
+            .flat_map(|wall| {
+                store.get_wall_openings(wall.id).into_iter().map(|opening| {
+                    let opening_type = match &opening.opening_type {
+                        geometry_core::domain::OpeningType::Door => "door",
+                        geometry_core::domain::OpeningType::Window => "window",
+                        geometry_core::domain::OpeningType::Other(_) => "other",
+                    };
+                    serde_json::json!({
+                        "id": opening.id.to_string(),
+                        "type": opening_type,
+                        "wallId": opening.wall_id.to_string(),
+                        "width": opening.width,
+                        "height": opening.height,
+                        "position": opening.position_along_wall
+                    })
+                })
+            })
+            .collect();
+
+        // Calculate total area and bounding box from rooms
+        let total_area: f64 = rooms.iter().map(|r| r.area()).sum();
+
+        // Calculate overall bounding box from footprint or rooms
+        let (footprint_width, footprint_depth) = store
+            .get_level_footprint(level_id_parsed)
+            .map(|fp| compute_bounding_box(&fp.polygon))
+            .unwrap_or_else(|| {
+                // Calculate from rooms if no footprint
+                if rooms.is_empty() {
+                    (0.0, 0.0)
+                } else {
+                    let mut min_x = f64::MAX;
+                    let mut max_x = f64::MIN;
+                    let mut min_y = f64::MAX;
+                    let mut max_y = f64::MIN;
+                    for room in &rooms {
+                        for pt in &room.boundary.outer {
+                            min_x = min_x.min(pt.x);
+                            max_x = max_x.max(pt.x);
+                            min_y = min_y.min(pt.y);
+                            max_y = max_y.max(pt.y);
+                        }
+                    }
+                    (max_x - min_x, max_y - min_y)
+                }
+            });
+
+        // Calculate room adjacencies (rooms that share an edge or are within 1 ft)
+        let mut adjacencies: Vec<(String, String)> = Vec::new();
+        for i in 0..rooms.len() {
+            for j in (i + 1)..rooms.len() {
+                if rooms_are_adjacent(&rooms[i].boundary, &rooms[j].boundary, 1.0) {
+                    adjacencies.push((rooms[i].id.to_string(), rooms[j].id.to_string()));
+                }
+            }
+        }
+
+        // Identify circulation spaces (hallways, foyers, etc.)
+        let circulation: Vec<String> = rooms
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.room_type,
+                    geometry_core::domain::RoomType::Hallway
+                        | geometry_core::domain::RoomType::Foyer
+                        | geometry_core::domain::RoomType::Mudroom
+                )
+            })
+            .map(|r| r.id.to_string())
+            .collect();
+
+        // Build constraints (simplified for now - can be enhanced)
+        let satisfied: Vec<String> = Vec::new();
+        let violated: Vec<String> = Vec::new();
+        let warnings: Vec<String> = Vec::new();
+
+        let observable_state = serde_json::json!({
+            "floorplan": {
+                "rooms": room_summaries,
+                "walls": wall_summaries,
+                "openings": opening_summaries
+            },
+            "layout": {
+                "totalArea": total_area,
+                "boundingBox": {
+                    "width": footprint_width,
+                    "depth": footprint_depth
+                },
+                "roomAdjacencies": adjacencies,
+                "circulation": circulation
+            },
+            "constraints": {
+                "satisfied": satisfied,
+                "violated": violated,
+                "warnings": warnings
+            },
+            "footprint": {
+                "width": footprint_width,
+                "depth": footprint_depth
+            }
+        });
+
+        serde_wasm_bindgen::to_value(&observable_state).unwrap_or(JsValue::NULL)
+    }
+
+    /// Get mutation counter for cache invalidation
+    /// This counter increments on every mutation operation
+    pub fn get_mutation_count(&self) -> u64 {
+        self.mutation_count.get()
+    }
+}
+
+/// Compute bounding box (width, depth) for a polygon
+fn compute_bounding_box(polygon: &geometry_core::domain::Polygon2) -> (f64, f64) {
+    if polygon.outer.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut min_x = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut min_y = f64::MAX;
+    let mut max_y = f64::MIN;
+    for pt in &polygon.outer {
+        min_x = min_x.min(pt.x);
+        max_x = max_x.max(pt.x);
+        min_y = min_y.min(pt.y);
+        max_y = max_y.max(pt.y);
+    }
+    (max_x - min_x, max_y - min_y)
+}
+
+/// Check if two room polygons are adjacent (within tolerance)
+fn rooms_are_adjacent(
+    poly1: &geometry_core::domain::Polygon2,
+    poly2: &geometry_core::domain::Polygon2,
+    tolerance: f64,
+) -> bool {
+    // Check if any vertex of poly1 is close to any edge of poly2
+    for pt1 in &poly1.outer {
+        for i in 0..poly2.outer.len() {
+            let j = (i + 1) % poly2.outer.len();
+            let dist = point_to_segment_distance(pt1, &poly2.outer[i], &poly2.outer[j]);
+            if dist < tolerance {
+                return true;
+            }
+        }
+    }
+    // Check the reverse
+    for pt2 in &poly2.outer {
+        for i in 0..poly1.outer.len() {
+            let j = (i + 1) % poly1.outer.len();
+            let dist = point_to_segment_distance(pt2, &poly1.outer[i], &poly1.outer[j]);
+            if dist < tolerance {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Calculate distance from a point to a line segment
+fn point_to_segment_distance(
+    pt: &geometry_core::domain::Point2,
+    seg_start: &geometry_core::domain::Point2,
+    seg_end: &geometry_core::domain::Point2,
+) -> f64 {
+    let dx = seg_end.x - seg_start.x;
+    let dy = seg_end.y - seg_start.y;
+    let len_sq = dx * dx + dy * dy;
+
+    if len_sq < 1e-10 {
+        // Degenerate segment (start == end)
+        return pt.distance_to(seg_start);
+    }
+
+    // Project point onto line
+    let t = ((pt.x - seg_start.x) * dx + (pt.y - seg_start.y) * dy) / len_sq;
+    let t_clamped = t.clamp(0.0, 1.0);
+
+    // Closest point on segment
+    let closest_x = seg_start.x + t_clamped * dx;
+    let closest_y = seg_start.y + t_clamped * dy;
+
+    let diff_x = pt.x - closest_x;
+    let diff_y = pt.y - closest_y;
+    (diff_x * diff_x + diff_y * diff_y).sqrt()
 }
 
 // Import JS types for typed arrays

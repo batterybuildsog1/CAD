@@ -63,7 +63,7 @@ const model = genAI.getGenerativeModel({
   generationConfig: {
     temperature: 1.0,        // CRITICAL: Use 1.0, NOT 0
     thinkingConfig: {
-      thinkingBudget: 32768  // Maximum thinking tokens for complex CAD reasoning
+      thinkingLevel: 'high'  // 'low' | 'medium' | 'high' - use high for complex CAD reasoning
     }
   },
   safetySettings: [
@@ -80,7 +80,7 @@ const model = genAI.getGenerativeModel({
 - Gemini 3.0 Pro has **native reasoning** that works better at standard temperature
 - Do NOT use complex chain-of-thought prompting; Gemini 3 handles this internally
 - Lower temperatures actually **hurt** reasoning capability in Gemini 3
-- Use `thinkingBudget: 32768` for complex spatial reasoning instead of temperature tuning
+- Use `thinkingLevel: 'high'` for complex spatial reasoning instead of temperature tuning
 
 ---
 
@@ -491,7 +491,7 @@ const model = genAI.getGenerativeModelFromCachedContent(cache);
 |---------|-------|-----------|
 | **Model** | `gemini-3-pro-preview` | Gemini 3 Pro (November 2025 preview) |
 | **Temperature** | `1.0` | CRITICAL: Do NOT lower. Gemini 3 reasoning works best here. |
-| **Thinking Budget** | `32768` | Maximum reasoning for complex CAD spatial logic |
+| **Thinking Level** | `'high'` | Maximum reasoning for complex CAD spatial logic (`'low'` / `'medium'` / `'high'`) |
 | **Tool Config** | `AUTO` | Let model decide when to use tools (recommended default) |
 | **Chat Session** | Required | Use `startChat()` for automatic thought signature handling |
 | **Safety Settings** | `BLOCK_NONE` (all) | Technical code requires no content filtering |
@@ -556,11 +556,11 @@ NEVER:
 
 | File | Action | Status | Purpose |
 |------|--------|--------|---------|
-| `packages/frontend/lib/gemini-cad.ts` | NEW | ✅ DONE | Core Gemini client with observable state pattern |
-| `packages/frontend/lib/gemini-tools.ts` | NEW | ✅ DONE | All 26 CAD tool definitions with Type schemas |
-| `packages/frontend/lib/gemini-types.ts` | NEW | ✅ DONE | TypeScript types for tool calls and responses |
-| `packages/frontend/lib/api-tool-executor.ts` | NEW | ✅ DONE | HTTP executor mapping tools to REST API |
-| `packages/frontend/src/app/api/ai/generate/route.ts` | NEW | ✅ DONE | Next.js API route for generation |
+| `packages/frontend-svelte/src/lib/gemini/gemini-cad.ts` | NEW | ✅ DONE | Core Gemini client with observable state pattern |
+| `packages/frontend-svelte/src/lib/gemini/gemini-tools.ts` | NEW | ✅ DONE | All 26 CAD tool definitions with Type schemas |
+| `packages/frontend-svelte/src/lib/gemini/gemini-types.ts` | NEW | ✅ DONE | TypeScript types for tool calls and responses |
+| `packages/frontend-svelte/src/routes/api/ai/chat/+server.ts` | NEW | ✅ DONE | SvelteKit API route for AI chat |
+| `packages/frontend-svelte/src/routes/api/ai/vision/+server.ts` | NEW | ✅ DONE | SvelteKit API route for vision |
 | `packages/geometry-core/src/domain/error.rs` | NEW | ✅ DONE | Structured error types for AI feedback |
 | `packages/geometry-core/src/rhai_api/mod.rs` | MODIFY | ✅ DONE | Updated with structured error returns |
 
@@ -584,7 +584,7 @@ NEVER:
 | **Informed decisions** | Show what happened, not just success/fail |
 | **Self-verification** | Model checks own work against explicit criteria |
 | **Checkpoints not retries** | Break tasks into verifiable steps |
-| **Native reasoning** | Use thinkingBudget, not temperature hacks |
+| **Native reasoning** | Use thinkingLevel, not temperature hacks |
 
 ### Accepted Trade-offs
 
