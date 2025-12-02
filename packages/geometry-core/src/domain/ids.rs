@@ -102,6 +102,10 @@ define_id!(CableSegmentId);
 // Geometry reference ID (for Truck solids stored in cache)
 define_id!(SolidId);
 
+// Framing IDs - Phase 7 (Wall Framing)
+define_id!(FramingMemberId);
+define_id!(FramingLayoutId);
+
 #[cfg(test)]
 mod tests {
     use super::*;

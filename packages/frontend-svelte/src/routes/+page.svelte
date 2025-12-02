@@ -10,12 +10,12 @@
   import { wasmManager, type OpeningSummary } from '$lib/wasm-store.svelte';
   import { regenerateAllDoors, type DoorPlacement } from '$lib/circulation-utils';
 
-  // View mode state
-  type ViewMode = '3d' | '2d' | 'split';
-  let viewMode = $state<ViewMode>('3d');
+// View mode state - keep UI to just 3D and 2D for clarity
+type ViewMode = '3d' | '2d';
+let viewMode = $state<ViewMode>('3d');
 
   // Render mode for 3D viewer
-  type RenderMode = 'solid' | 'shell' | 'combined';
+  type RenderMode = 'solid' | 'shell' | 'combined' | 'walls' | 'framing';
   let renderMode = $state<RenderMode>('combined');
 
   // Canvas reference for visual feedback
@@ -38,7 +38,8 @@
 
   function handleGenerate() {
     // Refresh view after generation
-    console.log('[Workspace] Generation complete, levels:', levelIds);
+    const levelsSnapshot = Array.isArray(levelIds) ? [...levelIds] : levelIds;
+    console.log('[Workspace] Generation complete, levels:', levelsSnapshot);
   }
 
   function setViewMode(mode: ViewMode) {
@@ -132,7 +133,7 @@
     <div class="flex items-center gap-4">
       <h1 class="text-lg font-bold text-gray-900">Gemini CAD</h1>
 
-      <!-- View mode toggle -->
+      <!-- View mode toggle (3D / 2D only) -->
       <div class="flex rounded-lg bg-gray-100 p-0.5">
         <button
           onclick={() => setViewMode('3d')}
@@ -147,13 +148,6 @@
                  {viewMode === '2d' ? 'bg-white shadow text-gray-900' : 'text-gray-600 hover:text-gray-900'}"
         >
           2D
-        </button>
-        <button
-          onclick={() => setViewMode('split')}
-          class="px-3 py-1 text-sm font-medium rounded-md transition-colors
-                 {viewMode === 'split' ? 'bg-white shadow text-gray-900' : 'text-gray-600 hover:text-gray-900'}"
-        >
-          Split
         </button>
       </div>
 
@@ -180,6 +174,20 @@
                    {renderMode === 'combined' ? 'bg-white shadow text-gray-900' : 'text-gray-600 hover:text-gray-900'}"
           >
             Combined
+          </button>
+          <button
+            onclick={() => setRenderMode('walls')}
+            class="px-3 py-1 text-sm font-medium rounded-md transition-colors
+                   {renderMode === 'walls' ? 'bg-white shadow text-gray-900' : 'text-gray-600 hover:text-gray-900'}"
+          >
+            Walls
+          </button>
+          <button
+            onclick={() => setRenderMode('framing')}
+            class="px-3 py-1 text-sm font-medium rounded-md transition-colors
+                   {renderMode === 'framing' ? 'bg-white shadow text-gray-900' : 'text-gray-600 hover:text-gray-900'}"
+          >
+            Framing
           </button>
         </div>
       {/if}
@@ -211,29 +219,12 @@
             onStoreReady={handleStoreReady}
           />
         </div>
-      {:else if viewMode === '2d'}
+      {:else}
         <div class="flex-1">
           <FloorPlanViewer
             onRoomMoved={handleRoomMoved}
             onRoomResized={handleRoomResized}
           />
-        </div>
-      {:else}
-        <!-- Split view -->
-        <div class="flex-1 flex">
-          <div class="w-1/2 border-r border-gray-300">
-            <Viewer3D
-              {levelIds}
-              {renderMode}
-              onStoreReady={handleStoreReady}
-            />
-          </div>
-          <div class="w-1/2">
-            <FloorPlanViewer
-              onRoomMoved={handleRoomMoved}
-              onRoomResized={handleRoomResized}
-            />
-          </div>
         </div>
       {/if}
     </div>

@@ -103,6 +103,14 @@ export interface CombinedRenderResult {
 }
 
 /**
+ * Framing render result with mesh and member type
+ */
+export interface FramingRenderItem {
+  mesh: WasmMesh;
+  memberType: string;
+}
+
+/**
  * Extended WasmStore interface with rendering methods.
  */
 export interface WasmStoreExtended {
@@ -110,9 +118,12 @@ export interface WasmStoreExtended {
   render_level_shell(level_id: string, wall_thickness: number): WasmMesh;
   render_rooms(level_id: string): WasmMesh[];
   render_level_combined(level_id: string, wall_thickness: number): CombinedRenderResult;
-  // Query methods for state derivation (to be added to Rust)
+  // Wall and framing rendering methods
+  render_walls?(level_id: string): WasmMesh[];
+  render_wall_framing?(wall_id: string): FramingRenderItem[];
+  // Query methods for state derivation
   get_level_rooms?(level_id: string): unknown;
-  get_level_walls?(level_id: string): unknown;
+  get_level_walls?(level_id: string): string[];
   get_observable_state?(level_id: string): unknown;
   get_mutation_count?(): number;
 }

@@ -10,9 +10,10 @@
 import type { Content } from '@google/genai';
 import { wasmManager, type ObservableState, type OpeningSummary } from './wasm-store.svelte';
 import type { WasmStore } from './wasm-loader';
-import type { ToolCall, ToolName, Point2D, RoomType } from './gemini-types';
+import type { ToolCall, ToolName, Point2D, RoomType, FloorplanProgram } from './gemini-types';
 import {
   buildGoalOrientedPrompt,
+  buildProgramPrompt,
   parseSelfVerification,
   isGenerationSuccessful,
   DEFAULT_SUCCESS_CRITERIA,
@@ -34,6 +35,8 @@ import {
   findSharedWall,
   calculateDoorPosition,
   roomToBounds,
+  analyzeLayoutForGuidance,
+  checkBedroomToLivingConnection,
   type DoorPlacement,
   type CirculationWarning
 } from './circulation-utils';
@@ -154,16 +157,63 @@ class GeminiCADManager {
     }
   }
 
+  // Store the current program for reference in subsequent messages
+  #currentProgram: FloorplanProgram | null = null;
+
+  // Current LLM provider (supports all 4 models)
+  #provider = $state<'gemini' | 'claude-sonnet' | 'claude-opus' | 'grok'>('gemini');
+
+  get provider() { return this.#provider; }
+
+  setProvider(provider: 'gemini' | 'claude-sonnet' | 'claude-opus' | 'grok'): void {
+    this.#provider = provider;
+    console.log(`[GeminiCAD] Switched to provider: ${provider}`);
+  }
+
+  /**
+   * Get provider display info
+   */
+  getProviderDisplayName(): string {
+    const names = {
+      'gemini': 'Gemini 3.0 Pro',
+      'claude-sonnet': 'Claude Sonnet 4.5',
+      'claude-opus': 'Claude Opus 4.5',
+      'grok': 'Grok 4.1'
+    };
+    return names[this.#provider] || this.#provider;
+  }
+
+  /**
+   * Set the current floorplan program (from intake form)
+   */
+  setProgram(program: FloorplanProgram): void {
+    this.#currentProgram = program;
+  }
+
+  /**
+   * Get the current program
+   */
+  get currentProgram() { return this.#currentProgram; }
+
   /**
    * Generate CAD from natural language prompt
+   * @param prompt - User's message or instruction
+   * @param successCriteria - Goals to achieve
+   * @param program - Optional FloorplanProgram from intake form (used for initial generation)
    */
   async generate(
     prompt: string,
-    successCriteria: string[] = DEFAULT_SUCCESS_CRITERIA
+    successCriteria: string[] = DEFAULT_SUCCESS_CRITERIA,
+    program?: FloorplanProgram
   ): Promise<GenerationResult> {
     this.#loading = true;
     this.#error = null;
     this.#visualIterations = 0;
+
+    // Store program if provided
+    if (program) {
+      this.#currentProgram = program;
+    }
 
     // Add user message
     this.addMessage({
@@ -173,8 +223,10 @@ class GeminiCADManager {
     });
 
     try {
-      // Build goal-oriented prompt
-      const fullPrompt = buildGoalOrientedPrompt(prompt, successCriteria);
+      // Build prompt - use program-aware prompt if we have a program
+      const fullPrompt = this.#currentProgram
+        ? buildProgramPrompt(this.#currentProgram, prompt, successCriteria)
+        : buildGoalOrientedPrompt(prompt, successCriteria);
 
       // Initial generation
       let result = await this.executeGenerationLoop(fullPrompt);
@@ -318,7 +370,7 @@ class GeminiCADManager {
   }
 
   /**
-   * Call the server API for Gemini chat
+   * Call the server API for LLM chat (supports Gemini, Claude, Grok)
    */
   private async callServerAPI(prompt: string): Promise<ChatResponse> {
     // Prune history before each request to prevent unbounded growth
@@ -331,7 +383,8 @@ class GeminiCADManager {
         body: JSON.stringify({
           message: prompt,
           history: this.#history,
-          stateForLLM: this.formatStateForLLM()
+          stateForLLM: this.formatStateForLLM(),
+          provider: this.#provider
         })
       });
 
@@ -589,8 +642,10 @@ class GeminiCADManager {
 
       case 'add_opening': {
         // Store opening info for later rendering
-        const opening = {
-          type: args.opening_type as string,
+        const openingType = args.opening_type as 'door' | 'window' | 'cased_opening';
+        const opening: OpeningSummary = {
+          id: crypto.randomUUID(),
+          type: openingType,
           room1: args.room1_id as string,
           room2: args.room2_id as string | undefined,
           width: args.width as number,
@@ -614,6 +669,223 @@ class GeminiCADManager {
           options: args.options as string[] | undefined,
           context: args.context as string | undefined
         };
+      }
+
+      // ========================================================================
+      // Wall Management Tools
+      // ========================================================================
+
+      case 'create_wall': {
+        const { start_x, start_y, end_x, end_y, height = 8, wall_type = 'interior_partition' } = args as {
+          start_x: number;
+          start_y: number;
+          end_x: number;
+          end_y: number;
+          height?: number;
+          wall_type?: string;
+        };
+        const levelId = await this.ensureLevelExists(s, 0);
+
+        // Get or create wall assembly
+        let assemblyId: string;
+        if (typeof s.get_or_create_wall_assembly === 'function') {
+          assemblyId = s.get_or_create_wall_assembly(wall_type) as string;
+        } else {
+          // Fallback: create assembly manually if helper doesn't exist
+          assemblyId = `assembly_${wall_type}`;
+        }
+
+        // Create wall using WASM binding
+        let wallId: string;
+        if (typeof s.create_wall_coords === 'function') {
+          wallId = s.create_wall_coords(levelId, start_x, start_y, end_x, end_y, height, assemblyId) as string;
+        } else {
+          // Fallback: generate wall ID if WASM function not available
+          wallId = crypto.randomUUID();
+          console.warn('[GeminiCAD] create_wall_coords not available in WASM, wall created in state only');
+        }
+
+        // Update observable state with new wall
+        wasmManager.updateState(state => ({
+          ...state,
+          floorplan: {
+            ...state.floorplan,
+            walls: [...(state.floorplan.walls || []), {
+              id: wallId,
+              start: [start_x, start_y] as [number, number],
+              end: [end_x, end_y] as [number, number],
+              height,
+              wallType: wall_type
+            }]
+          }
+        }));
+
+        wasmManager.syncFromWasm();
+
+        return {
+          success: true,
+          wallId,
+          message: `Created ${wall_type} wall from (${start_x}, ${start_y}) to (${end_x}, ${end_y})`
+        };
+      }
+
+      case 'auto_generate_walls': {
+        const levelId = await this.ensureLevelExists(s, 0);
+
+        let result: { wallsCreated: number; decisions: Array<{ room1: string; room2: string; wallType: string }> };
+
+        if (typeof s.auto_generate_walls === 'function') {
+          result = s.auto_generate_walls(levelId) as typeof result;
+        } else {
+          // Fallback: implement basic auto-generation logic in JS
+          const rooms = wasmManager.observableState.floorplan.rooms;
+          const decisions: Array<{ room1: string; room2: string; wallType: string }> = [];
+
+          // Privacy rooms that always get walls
+          const privacyTypes = ['bedroom', 'bathroom', 'closet', 'office'];
+          // Open concept rooms that share space
+          const openTypes = ['kitchen', 'dining', 'living', 'family', 'great_room'];
+
+          for (const room of rooms) {
+            const needsWalls = privacyTypes.includes(room.type);
+            if (needsWalls) {
+              decisions.push({ room1: room.id, room2: 'exterior', wallType: 'full' });
+            }
+          }
+
+          result = {
+            wallsCreated: decisions.length,
+            decisions
+          };
+          console.warn('[GeminiCAD] auto_generate_walls not available in WASM, using JS fallback');
+        }
+
+        wasmManager.syncFromWasm();
+
+        return {
+          success: true,
+          wallsCreated: result.wallsCreated,
+          decisions: result.decisions,
+          message: `Auto-generated ${result.wallsCreated} walls based on room types`
+        };
+      }
+
+      case 'set_room_openness': {
+        const { room1_id, room2_id, wall_type } = args as {
+          room1_id: string;
+          room2_id: string;
+          wall_type: 'full' | 'none' | 'half' | 'cased_opening';
+        };
+
+        let result: { success: boolean; previousType?: string };
+
+        if (typeof s.set_wall_between_rooms === 'function') {
+          result = s.set_wall_between_rooms(room1_id, room2_id, wall_type) as typeof result;
+        } else {
+          // Fallback: update state directly
+          result = { success: true };
+          console.warn('[GeminiCAD] set_wall_between_rooms not available in WASM, updating state directly');
+        }
+
+        // Update observable state with room openness info
+        wasmManager.updateState(state => ({
+          ...state,
+          floorplan: {
+            ...state.floorplan,
+            roomConnections: [...(state.floorplan.roomConnections || []), {
+              room1: room1_id,
+              room2: room2_id,
+              wallType: wall_type
+            }]
+          }
+        }));
+
+        wasmManager.syncFromWasm();
+
+        return {
+          success: true,
+          result,
+          message: `Set wall type between rooms to '${wall_type}'`
+        };
+      }
+
+      case 'generate_framing': {
+        const { wall_id } = args as { wall_id?: string };
+
+        if (wall_id) {
+          // Generate framing for specific wall
+          let framingSummary: { studCount: number; headerCount: number };
+
+          if (typeof s.generate_wall_framing === 'function') {
+            framingSummary = s.generate_wall_framing(wall_id) as typeof framingSummary;
+          } else {
+            // Fallback: estimate framing based on wall length
+            const walls = wasmManager.observableState.floorplan.walls || [];
+            const wall = walls.find(w => w.id === wall_id);
+            if (wall) {
+              const length = Math.sqrt(
+                Math.pow(wall.end[0] - wall.start[0], 2) +
+                Math.pow(wall.end[1] - wall.start[1], 2)
+              );
+              // Studs every 16" (1.33 ft)
+              framingSummary = {
+                studCount: Math.ceil(length / 1.33) + 1,
+                headerCount: 0
+              };
+            } else {
+              framingSummary = { studCount: 0, headerCount: 0 };
+            }
+            console.warn('[GeminiCAD] generate_wall_framing not available in WASM, using JS estimation');
+          }
+
+          wasmManager.syncFromWasm();
+
+          return {
+            success: true,
+            framingSummary,
+            message: `Generated framing for wall ${wall_id}`
+          };
+        } else {
+          // Generate framing for all walls
+          const levelId = await this.ensureLevelExists(s, 0);
+          let wallIds: string[] = [];
+
+          if (typeof s.get_level_walls === 'function') {
+            wallIds = s.get_level_walls(levelId) as string[];
+          } else {
+            // Fallback: get walls from observable state
+            wallIds = (wasmManager.observableState.floorplan.walls || []).map(w => w.id);
+          }
+
+          const results: Array<{ wallId: string; studCount: number }> = [];
+
+          for (const wid of wallIds) {
+            if (typeof s.generate_wall_framing === 'function') {
+              const framingResult = s.generate_wall_framing(wid) as { studCount: number };
+              results.push({ wallId: wid, studCount: framingResult.studCount });
+            } else {
+              // Fallback estimation
+              const walls = wasmManager.observableState.floorplan.walls || [];
+              const wall = walls.find(w => w.id === wid);
+              if (wall) {
+                const length = Math.sqrt(
+                  Math.pow(wall.end[0] - wall.start[0], 2) +
+                  Math.pow(wall.end[1] - wall.start[1], 2)
+                );
+                results.push({ wallId: wid, studCount: Math.ceil(length / 1.33) + 1 });
+              }
+            }
+          }
+
+          wasmManager.syncFromWasm();
+
+          return {
+            success: true,
+            wallsFramed: wallIds.length,
+            results,
+            message: `Generated framing for ${wallIds.length} walls`
+          };
+        }
       }
 
       default:
@@ -658,11 +930,11 @@ class GeminiCADManager {
   }
 
   /**
-   * Derive footprint from room bounding box
+   * Derive footprint from room bounding box and set it in WASM
    */
   private deriveFootprintFromRooms(): void {
-    const rooms = wasmManager.observableState.floorplan.rooms;
-    if (rooms.length === 0) {
+    const rooms = wasmManager.observableState?.floorplan?.rooms;
+    if (!rooms || rooms.length === 0) {
       wasmManager.setFootprint(0, 0);
       return;
     }
@@ -681,7 +953,29 @@ class GeminiCADManager {
 
     const width = maxX - minX;
     const depth = maxY - minY;
+
+    // Update JS state
     wasmManager.setFootprint(width, depth);
+
+    // Also set in WASM store so render_level_combined can find it
+    const store = wasmManager.store;
+    if (store && this.levelIds.size > 0) {
+      // Get first level ID (ground floor)
+      const levelId = this.levelIds.get(0);
+      if (levelId) {
+        try {
+          const s = store as unknown as Record<string, (...args: unknown[]) => unknown>;
+          if (typeof s.set_level_footprint_rect === 'function') {
+            s.set_level_footprint_rect(levelId, width, depth);
+            console.log(`[GeminiCAD] Set WASM footprint: ${width}' × ${depth}' for level ${levelId}`);
+          } else {
+            console.error('[GeminiCAD] set_level_footprint_rect not available on WASM store');
+          }
+        } catch (e) {
+          console.error('[GeminiCAD] Failed to set WASM footprint:', e);
+        }
+      }
+    }
   }
 
   /**
@@ -777,6 +1071,35 @@ class GeminiCADManager {
       output += `\n=== ORPHANED ROOMS (need doors) ===\n`;
       for (const room of orphanedRooms) {
         output += `- ${room.name} (${room.type})\n`;
+      }
+    }
+
+    // Design guidance for proactive suggestions
+    const guidance = analyzeLayoutForGuidance(floorplan.rooms, doors as DoorPlacement[]);
+    if (guidance.missingElements.length > 0 || guidance.suggestedQuestions.length > 0) {
+      output += `\n=== DESIGN GUIDANCE ===\n`;
+      output += `Layout status: ${guidance.layoutQuality}\n`;
+      if (guidance.missingElements.length > 0) {
+        output += `Missing: ${guidance.missingElements.join(', ')}\n`;
+      }
+      if (guidance.suggestedQuestions.length > 0) {
+        output += `Consider asking:\n`;
+        for (const q of guidance.suggestedQuestions) {
+          output += `→ ${q}\n`;
+        }
+      }
+    }
+
+    // Check for bedroom-to-living soft warning
+    const bedroomLivingWarning = checkBedroomToLivingConnection(
+      floorplan.rooms,
+      doors as DoorPlacement[]
+    );
+    if (bedroomLivingWarning) {
+      output += `\n=== SOFT WARNING ===\n`;
+      output += `! ${bedroomLivingWarning.message}\n`;
+      if (bedroomLivingWarning.suggestion) {
+        output += `→ ${bedroomLivingWarning.suggestion}\n`;
       }
     }
 

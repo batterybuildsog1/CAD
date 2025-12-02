@@ -33,6 +33,9 @@ pub struct Store {
     pub rooms: HashMap<RoomId, Room>,
     pub openings: HashMap<OpeningId, Opening>,
 
+    // Phase 7 entities - Framing
+    pub framing_layouts: HashMap<FramingLayoutId, FramingLayout>,
+
     // Event logs per project
     pub event_logs: HashMap<ProjectId, EventLog>,
 }
@@ -830,6 +833,59 @@ impl Store {
         }
 
         Ok(())
+    }
+
+    // ========== Framing Layout Operations ==========
+
+    /// Store a framing layout for a wall
+    pub fn store_framing_layout(&mut self, layout: FramingLayout) -> Result<FramingLayoutId> {
+        let layout_id = layout.id;
+        let wall_id = layout.wall_id;
+
+        // Update wall's framing_layout_id reference
+        if let Some(wall) = self.walls.get_mut(&wall_id) {
+            wall.framing_layout_id = Some(layout_id);
+        } else {
+            return Err(anyhow!("Wall not found: {:?}", wall_id));
+        }
+
+        self.framing_layouts.insert(layout_id, layout);
+        Ok(layout_id)
+    }
+
+    /// Get a framing layout by ID
+    pub fn get_framing_layout(&self, id: FramingLayoutId) -> Option<&FramingLayout> {
+        self.framing_layouts.get(&id)
+    }
+
+    /// Get a mutable reference to a framing layout
+    pub fn get_framing_layout_mut(&mut self, id: FramingLayoutId) -> Option<&mut FramingLayout> {
+        self.framing_layouts.get_mut(&id)
+    }
+
+    /// Get framing layout for a wall
+    pub fn get_wall_framing_layout(&self, wall_id: WallId) -> Option<&FramingLayout> {
+        let wall = self.walls.get(&wall_id)?;
+        let layout_id = wall.framing_layout_id?;
+        self.framing_layouts.get(&layout_id)
+    }
+
+    /// Remove a framing layout
+    pub fn remove_framing_layout(&mut self, layout_id: FramingLayoutId) -> Result<()> {
+        let layout = self.framing_layouts.remove(&layout_id)
+            .ok_or_else(|| anyhow!("Framing layout not found: {:?}", layout_id))?;
+
+        // Clear the reference from the wall
+        if let Some(wall) = self.walls.get_mut(&layout.wall_id) {
+            wall.framing_layout_id = None;
+        }
+
+        Ok(())
+    }
+
+    /// List all framing layouts
+    pub fn list_framing_layouts(&self) -> Vec<&FramingLayout> {
+        self.framing_layouts.values().collect()
     }
 
     // ========== Event Log Operations ==========

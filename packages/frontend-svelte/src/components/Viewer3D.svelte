@@ -17,15 +17,17 @@
     WasmGeometryLoader,
     type WasmMesh,
     type WasmStoreExtended,
-    type CombinedRenderResult
+    type CombinedRenderResult,
+    type FramingRenderItem
   } from '$lib/wasm-loader';
+  import { FRAMING_COLORS, type FramingMemberType } from '$lib/framing-types';
 
   // Props
   interface Props {
     levelIds?: string[];
     showGrid?: boolean;
     backgroundColor?: string;
-    renderMode?: 'solid' | 'shell' | 'combined';
+    renderMode?: 'solid' | 'shell' | 'combined' | 'walls' | 'framing';
     wallThickness?: number;
     selectedLevelIds?: string[];
     onLevelClick?: (levelId: string) => void;
@@ -62,7 +64,7 @@
   let meshes = $state<LevelMeshData[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
-  let camera = $state<PerspectiveCamera | null>(null);
+  let camera = $state<PerspectiveCamera | undefined>(undefined);
 
   // Track geometries for cleanup
   let geometries: BufferGeometry[] = [];
@@ -85,6 +87,93 @@
     WasmGeometryLoader.clearCache();
   });
 
+  // Wall color constant
+  const WALL_COLOR = 0x8B7355;  // Brown for walls
+
+  /**
+   * Render walls for a level
+   */
+  function renderWalls(
+    store: WasmStoreExtended,
+    levelId: string,
+    newMeshes: LevelMeshData[]
+  ): void {
+    if (!store.render_walls) {
+      console.warn('[Viewer3D] render_walls not available');
+      return;
+    }
+
+    try {
+      const wallMeshes = store.render_walls(levelId);
+      if (!wallMeshes?.length) {
+        console.warn(`[Viewer3D] No wall meshes returned for level ${levelId}`);
+        return;
+      }
+
+      wallMeshes.forEach((wasmMesh: WasmMesh, idx: number) => {
+        const geometry = WasmGeometryLoader.load(wasmMesh);
+        geometries.push(geometry);
+        newMeshes.push({
+          levelId: `${levelId}_wall_${idx}`,
+          geometry,
+          color: WALL_COLOR
+        });
+      });
+
+      console.log(`[Viewer3D] Rendered ${wallMeshes.length} walls for level ${levelId}`);
+    } catch (e) {
+      console.warn('[Viewer3D] Wall rendering failed:', e);
+    }
+  }
+
+  /**
+   * Render framing members for all walls on a level
+   */
+  function renderFraming(
+    store: WasmStoreExtended,
+    levelId: string,
+    newMeshes: LevelMeshData[]
+  ): void {
+    if (!store.render_wall_framing || !store.get_level_walls) {
+      console.warn('[Viewer3D] render_wall_framing or get_level_walls not available');
+      return;
+    }
+
+    try {
+      // Get all walls on level
+      const wallIds = store.get_level_walls(levelId);
+      if (!wallIds?.length) {
+        console.warn(`[Viewer3D] No walls found for level ${levelId}`);
+        return;
+      }
+
+      let totalFramingMembers = 0;
+
+      wallIds.forEach((wallId: string) => {
+        const framingData = store.render_wall_framing!(wallId);
+        if (!framingData?.length) return;
+
+        framingData.forEach((item: FramingRenderItem, idx: number) => {
+          const geometry = WasmGeometryLoader.load(item.mesh);
+          const memberType = item.memberType as FramingMemberType;
+          const color = FRAMING_COLORS[memberType] || 0xD4A574;
+
+          geometries.push(geometry);
+          newMeshes.push({
+            levelId: `${levelId}_framing_${wallId}_${idx}`,
+            geometry,
+            color
+          });
+          totalFramingMembers++;
+        });
+      });
+
+      console.log(`[Viewer3D] Rendered ${totalFramingMembers} framing members for level ${levelId}`);
+    } catch (e) {
+      console.warn('[Viewer3D] Framing rendering failed:', e);
+    }
+  }
+
   // Render meshes when levelIds or renderMode changes
   $effect(() => {
     if (!wasmManager.store || levelIds.length === 0) {
@@ -94,13 +183,26 @@
 
     const newMeshes: LevelMeshData[] = [];
     const store = wasmManager.store as unknown as WasmStoreExtended;
-
-    console.log('[Viewer3D] Rendering levels:', levelIds, 'mode:', renderMode);
+    const levelsSnapshot = Array.isArray(levelIds) ? [...levelIds] : levelIds;
+    console.log('[Viewer3D] Rendering levels:', levelsSnapshot, 'mode:', renderMode);
 
     for (let i = 0; i < levelIds.length; i++) {
       const levelId = levelIds[i];
 
       try {
+        // Handle walls-only mode
+        if (renderMode === 'walls') {
+          renderWalls(store, levelId, newMeshes);
+          continue;
+        }
+
+        // Handle framing mode (walls + framing members)
+        if (renderMode === 'framing') {
+          renderWalls(store, levelId, newMeshes);  // Render walls as context
+          renderFraming(store, levelId, newMeshes);  // Overlay framing
+          continue;
+        }
+
         if (renderMode === 'shell') {
           if (!store.render_level_shell) {
             console.error(`[Viewer3D] render_level_shell not available for ${levelId}`);
@@ -119,14 +221,18 @@
 
         if (renderMode === 'combined') {
           if (!store.render_level_combined) {
-            console.error(`[Viewer3D] render_level_combined not available for ${levelId}`);
-            continue;
+            throw new Error(`[Viewer3D] render_level_combined not implemented in WASM`);
           }
-          const combined: CombinedRenderResult = store.render_level_combined(levelId, wallThickness);
+
+          const combined = store.render_level_combined(levelId, wallThickness);
+          console.log(`[Viewer3D] render_level_combined returned:`, combined);
+
+          if (!combined) {
+            throw new Error(`[Viewer3D] render_level_combined(${levelId}) returned null/undefined`);
+          }
 
           if (!combined.shell) {
-            console.error(`[Viewer3D] Combined render for ${levelId} missing shell`);
-            continue;
+            throw new Error(`[Viewer3D] render_level_combined(${levelId}) missing 'shell' property. Got keys: ${Object.keys(combined).join(', ')}`);
           }
 
           const shellGeometry = WasmGeometryLoader.load(combined.shell);
@@ -136,6 +242,10 @@
             geometry: shellGeometry,
             color: LEVEL_COLORS[i % LEVEL_COLORS.length]
           });
+
+          if (!combined.rooms) {
+            throw new Error(`[Viewer3D] render_level_combined(${levelId}) missing 'rooms' property`);
+          }
 
           combined.rooms.forEach((roomMesh, roomIndex) => {
             const roomGeometry = WasmGeometryLoader.load(roomMesh);
@@ -217,7 +327,9 @@
         position={[20, 20, 20]}
         fov={50}
         bind:ref={camera}
-      />
+      >
+        <OrbitControls />
+      </T.PerspectiveCamera>
 
       <!-- Background color -->
       <T.Color attach="background" args={[backgroundColor]} />
@@ -247,9 +359,6 @@
         <T.PlaneGeometry args={[500, 500]} />
         <T.MeshStandardMaterial color="#e5e7eb" roughness={0.9} metalness={0} />
       </T.Mesh>
-
-      <!-- Orbit controls -->
-      <OrbitControls />
 
       <!-- Render all level meshes -->
       {#each meshes as { levelId, geometry, color }}

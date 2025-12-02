@@ -13,6 +13,7 @@ export interface ObservableState {
     rooms: RoomSummary[];
     walls: WallSummary[];
     openings: OpeningSummary[];
+    roomConnections?: RoomConnection[];  // Wall type overrides between rooms
   };
   layout: {
     totalArea: number;
@@ -44,8 +45,15 @@ export interface WallSummary {
   id: string;
   start: [number, number];
   end: [number, number];
-  thickness: number;
+  thickness?: number;
   height: number;
+  wallType?: string;  // 'exterior_2x6' | 'interior_partition' etc.
+}
+
+export interface RoomConnection {
+  room1: string;
+  room2: string;
+  wallType: 'full' | 'none' | 'half' | 'cased_opening';
 }
 
 export interface OpeningSummary {
@@ -99,9 +107,50 @@ export function deriveObservableState(
   // If WASM has get_observable_state, use it directly
   if (store.get_observable_state) {
     try {
-      const wasmState = store.get_observable_state(levelId);
+      const wasmState = store.get_observable_state(levelId) as Partial<ObservableState> | null | undefined;
       if (wasmState) {
-        return wasmState as ObservableState;
+        // Merge WASM-derived state with a fully-initialized default to ensure
+        // all nested objects/arrays (floorplan, footprint, constraints, etc.)
+        // are always defined. This prevents runtime undefined access in views
+        // even if WASM returns a partial structure.
+        const empty = createEmptyState();
+
+        const mergedFloorplan = {
+          ...empty.floorplan,
+          ...(wasmState.floorplan ?? {}),
+          rooms: wasmState.floorplan?.rooms ?? empty.floorplan.rooms,
+          walls: wasmState.floorplan?.walls ?? empty.floorplan.walls,
+          openings: wasmState.floorplan?.openings ?? empty.floorplan.openings
+        };
+
+        const mergedLayout = {
+          ...empty.layout,
+          ...(wasmState.layout ?? {}),
+          roomAdjacencies: wasmState.layout?.roomAdjacencies ?? empty.layout.roomAdjacencies,
+          circulation: wasmState.layout?.circulation ?? empty.layout.circulation
+        };
+
+        const mergedConstraints = {
+          ...empty.constraints,
+          ...(wasmState.constraints ?? {}),
+          satisfied: wasmState.constraints?.satisfied ?? empty.constraints.satisfied,
+          violated: wasmState.constraints?.violated ?? empty.constraints.violated,
+          warnings: wasmState.constraints?.warnings ?? empty.constraints.warnings
+        };
+
+        const mergedFootprint = {
+          ...empty.footprint,
+          ...(wasmState.footprint ?? {})
+        };
+
+        return {
+          ...empty,
+          ...wasmState,
+          floorplan: mergedFloorplan,
+          layout: mergedLayout,
+          constraints: mergedConstraints,
+          footprint: mergedFootprint
+        };
       }
     } catch (e) {
       console.warn('[deriveObservableState] WASM query failed, falling back to empty state:', e);

@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use super::ids::*;
 use super::spatial::Point2;
+use super::framing::WallFramingConfig;
 
 /// A single layer within a wall assembly (e.g., drywall, insulation, sheathing)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +113,10 @@ pub struct Wall {
     pub end: Point2,    // centerline end point
     pub height: f64,    // usually matches floor_to_floor
     pub base_offset: f64, // offset from level elevation
+    /// Framing configuration for this wall
+    pub framing_config: WallFramingConfig,
+    /// Reference to generated framing layout (if generated)
+    pub framing_layout_id: Option<FramingLayoutId>,
 }
 
 impl Wall {
@@ -130,11 +135,25 @@ impl Wall {
             end,
             height,
             base_offset: 0.0,
+            framing_config: WallFramingConfig::default(),
+            framing_layout_id: None,
         }
     }
 
     pub fn with_base_offset(mut self, offset: f64) -> Self {
         self.base_offset = offset;
+        self
+    }
+
+    /// Set framing configuration
+    pub fn with_framing_config(mut self, config: WallFramingConfig) -> Self {
+        self.framing_config = config;
+        self
+    }
+
+    /// Set framing layout reference
+    pub fn with_framing_layout(mut self, layout_id: FramingLayoutId) -> Self {
+        self.framing_layout_id = Some(layout_id);
         self
     }
 

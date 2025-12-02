@@ -77,15 +77,19 @@ export interface Point2DObject {
 export type Polygon2D = Point2D[];
 
 // ============================================================================
-// Tool Names - 5 collaborative tools
+// Tool Names - 9 collaborative tools (5 room + 4 wall)
 // ============================================================================
 
 export type ToolName =
-  | 'create_room'    // Place a room at position
-  | 'update_room'    // Move/resize/rename a room
-  | 'delete_room'    // Remove a room
-  | 'add_opening'    // Door/window between rooms
-  | 'ask_user';      // Ask clarifying question
+  | 'create_room'           // Place a room at position
+  | 'update_room'           // Move/resize/rename a room
+  | 'delete_room'           // Remove a room
+  | 'add_opening'           // Door/window between rooms
+  | 'ask_user'              // Ask clarifying question
+  | 'create_wall'           // Create a wall segment between two points
+  | 'auto_generate_walls'   // Auto-generate walls based on room types
+  | 'set_room_openness'     // Set wall type between adjacent rooms
+  | 'generate_framing';     // Generate structural framing for walls
 
 export interface ToolCall {
   name: ToolName;
@@ -112,3 +116,49 @@ export interface ToolErrorResponse {
 }
 
 export type ToolResponse<T = unknown> = ToolSuccessResponse<T> | ToolErrorResponse;
+
+// ============================================================================
+// FloorplanProgram - Structured House Requirements (Intake Form)
+// ============================================================================
+
+/**
+ * A room requirement in the floorplan program.
+ * Describes what the user wants, not exact dimensions.
+ */
+export interface RoomRequirement {
+  type: RoomType;
+  name?: string;                      // Custom name (e.g., "Jack's Room")
+  quantity?: number;                  // Default 1
+  minArea?: number;                   // Minimum square feet
+  maxArea?: number;                   // Maximum square feet
+  adjacentTo?: RoomType[];            // Preferred adjacencies
+  mustHaveHallwayAccess?: boolean;    // Default true for secondary bedrooms
+  features?: string[];                // e.g., ["ensuite", "walk-in closet"]
+}
+
+/**
+ * FloorplanProgram - Structured input from intake form.
+ * This is passed to the LLM as context before design begins.
+ */
+export interface FloorplanProgram {
+  // Basic requirements (from intake form)
+  stories: 1 | 2 | 3;
+  totalAreaTarget: number;            // Target gross square footage
+  totalAreaTolerance?: number;        // +/- percentage (default 10)
+
+  // Room program (auto-generated from intake form selections)
+  rooms: RoomRequirement[];
+
+  // Special requests (freeform text from user)
+  specialRequests?: string;
+
+  // Circulation preferences
+  circulation?: {
+    preferHallwayAccess?: boolean;    // Default true - bedrooms via hallway
+    allowBedroomToLiving?: boolean;   // Default false (soft warning)
+    entryType?: 'foyer' | 'mudroom' | 'direct';
+  };
+
+  // Style hints (informational, doesn't affect circulation rules)
+  style?: 'open_concept' | 'traditional' | 'hybrid';
+}
