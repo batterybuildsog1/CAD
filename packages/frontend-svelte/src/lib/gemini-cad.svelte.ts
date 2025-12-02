@@ -40,6 +40,8 @@ import {
   type DoorPlacement,
   type CirculationWarning
 } from './circulation-utils';
+import type { CostEstimate as ConstructionCostEstimate, CostCategory, CostLineItem, MaterialType, LaborType, PricingUnit } from './cost-types';
+import type { WasmStoreExtended } from './wasm-loader';
 
 // ============================================================================
 // Types
@@ -886,6 +888,174 @@ class GeminiCADManager {
             message: `Generated framing for ${wallIds.length} walls`
           };
         }
+      }
+
+      // ========================================================================
+      // Cost Estimation Tools
+      // ========================================================================
+
+      case 'generate_cost_estimate': {
+        // Generate cost estimate for current level
+        const levelId = wasmManager.levelIds[0];
+        if (!levelId) {
+          return { success: false, error: 'No level available' };
+        }
+
+        const extStore = store as unknown as WasmStoreExtended;
+        if (!extStore.generate_cost_estimate) {
+          return { success: false, error: 'Cost estimation not available in WASM module' };
+        }
+
+        try {
+          const estimate = extStore.generate_cost_estimate(levelId);
+
+          // Convert WASM snake_case to camelCase for frontend
+          const convertedLineItems: CostLineItem[] = estimate.line_items.map(item => ({
+            id: item.id,
+            category: item.category as CostCategory,
+            description: item.description,
+            materialType: item.material_type as MaterialType | undefined,
+            laborType: item.labor_type as LaborType | undefined,
+            quantity: item.quantity,
+            unit: item.unit as PricingUnit,
+            unitPrice: item.unit_price,
+            total: item.total,
+            notes: item.notes
+          }));
+
+          const convertedEstimate: ConstructionCostEstimate = {
+            id: estimate.id,
+            levelId: estimate.level_id,
+            lineItems: convertedLineItems,
+            subtotals: estimate.subtotals as Record<CostCategory, number>,
+            laborTotal: estimate.labor_total,
+            materialTotal: estimate.material_total,
+            grandTotal: estimate.grand_total,
+            createdAt: estimate.created_at,
+            notes: estimate.notes
+          };
+
+          // Update observable state with cost estimate
+          wasmManager.updateState(state => ({
+            ...state,
+            costEstimate: convertedEstimate
+          }));
+
+          // Return summary for AI
+          return {
+            success: true,
+            estimate: {
+              grandTotal: convertedEstimate.grandTotal,
+              materialTotal: convertedEstimate.materialTotal,
+              laborTotal: convertedEstimate.laborTotal,
+              lineItemCount: convertedEstimate.lineItems.length,
+              categorySummary: Object.entries(convertedEstimate.subtotals)
+                .filter(([_, v]) => v > 0)
+                .map(([k, v]) => ({ category: k, subtotal: v }))
+            },
+            message: `Generated cost estimate: $${convertedEstimate.grandTotal.toLocaleString()} total (${convertedEstimate.lineItems.length} line items)`
+          };
+        } catch (e) {
+          return { success: false, error: String(e) };
+        }
+      }
+
+      case 'set_unit_price': {
+        // Set a material price
+        const { material_type, unit, price, description } = args as {
+          material_type: string;
+          unit: string;
+          price: number;
+          description?: string;
+        };
+
+        const extStore = store as unknown as WasmStoreExtended;
+        if (!extStore.set_material_price) {
+          return { success: false, error: 'Price setting not available in WASM module' };
+        }
+
+        try {
+          extStore.set_material_price(material_type, unit, price);
+          return {
+            success: true,
+            message: `Set ${material_type} price to $${price} ${unit}${description ? ` (${description})` : ''}`
+          };
+        } catch (e) {
+          return { success: false, error: String(e) };
+        }
+      }
+
+      case 'set_labor_rate': {
+        // Set a labor rate
+        const { labor_type, unit, rate, description } = args as {
+          labor_type: string;
+          unit: string;
+          rate: number;
+          description?: string;
+        };
+
+        const extStore = store as unknown as WasmStoreExtended;
+        if (!extStore.set_labor_rate) {
+          return { success: false, error: 'Rate setting not available in WASM module' };
+        }
+
+        try {
+          extStore.set_labor_rate(labor_type, unit, rate);
+          return {
+            success: true,
+            message: `Set ${labor_type} rate to $${rate} ${unit}${description ? ` (${description})` : ''}`
+          };
+        } catch (e) {
+          return { success: false, error: String(e) };
+        }
+      }
+
+      case 'get_cost_breakdown': {
+        // Get detailed cost breakdown by category
+        const estimate = wasmManager.observableState.costEstimate;
+        if (!estimate) {
+          return {
+            success: false,
+            error: 'No cost estimate available. Run generate_cost_estimate first.'
+          };
+        }
+
+        const { category } = args as { category?: string };
+
+        if (category) {
+          // Return items for specific category
+          const items = estimate.lineItems.filter(item => item.category === category);
+          const subtotal = estimate.subtotals[category as CostCategory] || 0;
+
+          return {
+            success: true,
+            category,
+            subtotal,
+            itemCount: items.length,
+            items: items.map(i => ({
+              description: i.description,
+              quantity: i.quantity,
+              unit: i.unit,
+              unitPrice: i.unitPrice,
+              total: i.total
+            })),
+            message: `${category}: $${subtotal.toLocaleString()} (${items.length} items)`
+          };
+        }
+
+        // Return full breakdown
+        const categoriesWithCosts = Object.entries(estimate.subtotals)
+          .filter(([_, v]) => v > 0)
+          .map(([k, v]) => ({ category: k, subtotal: v }));
+
+        return {
+          success: true,
+          grandTotal: estimate.grandTotal,
+          materialTotal: estimate.materialTotal,
+          laborTotal: estimate.laborTotal,
+          categories: categoriesWithCosts,
+          message: `Total: $${estimate.grandTotal.toLocaleString()} | Materials: $${estimate.materialTotal.toLocaleString()} | Labor: $${estimate.laborTotal.toLocaleString()}`
+        };
       }
 
       default:

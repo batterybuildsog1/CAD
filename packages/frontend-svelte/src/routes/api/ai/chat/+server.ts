@@ -303,6 +303,82 @@ const CAD_TOOLS: FunctionDeclaration[] = [
       },
       required: []
     }
+  },
+  // Cost Estimation Tools
+  {
+    name: 'generate_cost_estimate',
+    description: 'Generate a cost estimate for the current floor plan. Calculates material and labor costs for foundation, framing, roofing, exterior, windows, doors, and interior finishes. All prices default to $0 until set by user.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: 'set_unit_price',
+    description: 'Set the unit price for a material. Use this to configure costs for estimating. Material types include: concrete_mix, concrete_rebar, lumber_2x4, lumber_2x6, asphalt_shingles, stucco, window_unit, exterior_door, interior_door, drywall, hardwood, tile, etc.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        material_type: {
+          type: Type.STRING,
+          description: 'The material type (e.g., "concrete_mix", "lumber_2x4", "asphalt_shingles", "stucco", "window_unit")'
+        },
+        unit: {
+          type: Type.STRING,
+          description: 'The pricing unit (e.g., "per_sqft", "per_component", "per_cubic_yard", "per_board", "per_linear_foot")'
+        },
+        price: {
+          type: Type.NUMBER,
+          description: 'The price per unit in dollars'
+        },
+        description: {
+          type: Type.STRING,
+          description: 'Optional description or supplier name'
+        }
+      },
+      required: ['material_type', 'unit', 'price']
+    }
+  },
+  {
+    name: 'set_labor_rate',
+    description: 'Set the labor rate for a trade. Labor types include: framing_carpentry, concrete_subgrade_prep, concrete_form_install, concrete_rebar_install, concrete_place_finish, roofing_install, siding_install, drywall_install, flooring_install, painting_labor, etc.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        labor_type: {
+          type: Type.STRING,
+          description: 'The labor type (e.g., "framing_carpentry", "concrete_place_finish", "roofing_install")'
+        },
+        unit: {
+          type: Type.STRING,
+          description: 'The rate unit (e.g., "per_sqft", "per_hour", "per_linear_foot")'
+        },
+        rate: {
+          type: Type.NUMBER,
+          description: 'The rate per unit in dollars'
+        },
+        description: {
+          type: Type.STRING,
+          description: 'Optional description'
+        }
+      },
+      required: ['labor_type', 'unit', 'rate']
+    }
+  },
+  {
+    name: 'get_cost_breakdown',
+    description: 'Get a detailed cost breakdown. Optionally filter by category to see line items.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        category: {
+          type: Type.STRING,
+          description: 'Optional category to filter by (e.g., "foundation", "framing", "roofing", "exterior", "windows", "doors", "drywall", "flooring")'
+        }
+      },
+      required: []
+    }
   }
 ];
 
@@ -427,6 +503,55 @@ const CAD_TOOLS_AGNOSTIC = [
       type: 'object' as const,
       properties: {
         wall_id: { type: 'string' as const, description: 'Wall ID to generate framing for. If not provided, generates for all walls.' }
+      },
+      required: []
+    }
+  },
+  // Cost Estimation Tools
+  {
+    name: 'generate_cost_estimate',
+    description: 'Generate a cost estimate for the current floor plan. Calculates material and labor costs for foundation, framing, roofing, exterior, windows, doors, and interior finishes. All prices default to $0 until set by user.',
+    parameters: {
+      type: 'object' as const,
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: 'set_unit_price',
+    description: 'Set the unit price for a material. Use this to configure costs for estimating. Material types include: concrete_mix, concrete_rebar, lumber_2x4, lumber_2x6, asphalt_shingles, stucco, window_unit, exterior_door, interior_door, drywall, hardwood, tile, etc.',
+    parameters: {
+      type: 'object' as const,
+      properties: {
+        material_type: { type: 'string' as const, description: 'The material type (e.g., "concrete_mix", "lumber_2x4", "asphalt_shingles", "stucco", "window_unit")' },
+        unit: { type: 'string' as const, description: 'The pricing unit (e.g., "per_sqft", "per_component", "per_cubic_yard", "per_board", "per_linear_foot")' },
+        price: { type: 'number' as const, description: 'The price per unit in dollars' },
+        description: { type: 'string' as const, description: 'Optional description or supplier name' }
+      },
+      required: ['material_type', 'unit', 'price']
+    }
+  },
+  {
+    name: 'set_labor_rate',
+    description: 'Set the labor rate for a trade. Labor types include: framing_carpentry, concrete_subgrade_prep, concrete_form_install, concrete_rebar_install, concrete_place_finish, roofing_install, siding_install, drywall_install, flooring_install, painting_labor, etc.',
+    parameters: {
+      type: 'object' as const,
+      properties: {
+        labor_type: { type: 'string' as const, description: 'The labor type (e.g., "framing_carpentry", "concrete_place_finish", "roofing_install")' },
+        unit: { type: 'string' as const, description: 'The rate unit (e.g., "per_sqft", "per_hour", "per_linear_foot")' },
+        rate: { type: 'number' as const, description: 'The rate per unit in dollars' },
+        description: { type: 'string' as const, description: 'Optional description' }
+      },
+      required: ['labor_type', 'unit', 'rate']
+    }
+  },
+  {
+    name: 'get_cost_breakdown',
+    description: 'Get a detailed cost breakdown. Optionally filter by category to see line items.',
+    parameters: {
+      type: 'object' as const,
+      properties: {
+        category: { type: 'string' as const, description: 'Optional category to filter by (e.g., "foundation", "framing", "roofing", "exterior", "windows", "doors", "drywall", "flooring")' }
       },
       required: []
     }

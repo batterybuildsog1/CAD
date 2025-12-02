@@ -6,9 +6,13 @@ use geometry_core::domain::{
     OpeningId, OpeningType, GridAxis, GridDirection,
     FramingLayout, FramingMember, FramingMemberType, LumberSize, FramingMaterial,
     RoughOpening, WallFramingConfig,
+    // Costing types
+    MaterialType, LaborType, PricingUnit, UnitPrice, LaborRate, PriceTable,
 };
+use geometry_core::costing::{CostCalculator, CostInput, RoomCostInput, OpeningCostInput};
 use geometry_core::geometry::{solid_to_mesh, extrude_polygon, extrude_polygon_shell, create_box};
 use std::str::FromStr;
+use std::collections::HashMap;
 
 #[wasm_bindgen]
 pub fn init_panic_hook() {
@@ -41,12 +45,13 @@ impl WasmMesh {
     }
 }
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 #[wasm_bindgen]
 pub struct WasmStore {
     inner: SharedStore,
     mutation_count: Cell<u64>,
+    cost_calculator: RefCell<CostCalculator>,
 }
 
 #[wasm_bindgen]
@@ -56,6 +61,7 @@ impl WasmStore {
         Self {
             inner: new_shared_store(),
             mutation_count: Cell::new(0),
+            cost_calculator: RefCell::new(CostCalculator::with_defaults()),
         }
     }
 
@@ -1853,6 +1859,410 @@ impl WasmStore {
         wall.framing_config = config;
         self.bump_mutation_count();
         Ok(())
+    }
+
+    // ============================================================================
+    // COST ESTIMATION
+    // ============================================================================
+
+    /// Generate a cost estimate for a level
+    /// Returns a serialized CostEstimate object
+    #[wasm_bindgen]
+    pub fn generate_cost_estimate(&self, level_id: &str) -> Result<JsValue, JsValue> {
+        let level_id = LevelId::from_str(level_id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let store = self.inner.read()
+            .map_err(|_| JsValue::from_str("Failed to acquire read lock"))?;
+
+        // Build cost input from store data
+        let cost_input = self.build_cost_input(&store, level_id)?;
+
+        // Calculate estimate
+        let calculator = self.cost_calculator.borrow();
+        let estimate = calculator.calculate(&cost_input);
+
+        // Serialize to JS
+        serde_wasm_bindgen::to_value(&estimate)
+            .map_err(|e| JsValue::from_str(&format!("Failed to serialize estimate: {}", e)))
+    }
+
+    /// Build a CostInput from store data for a given level
+    fn build_cost_input(
+        &self,
+        store: &geometry_core::store::Store,
+        level_id: LevelId,
+    ) -> Result<CostInput, JsValue> {
+        let level = store.get_level(level_id)
+            .ok_or_else(|| JsValue::from_str("Level not found"))?;
+
+        // Get footprint data
+        let footprint = store.get_level_footprint(level_id);
+        let footprint_sqft = footprint
+            .as_ref()
+            .map(|fp| fp.polygon.area())
+            .unwrap_or(0.0);
+        let exterior_perimeter = footprint
+            .as_ref()
+            .map(|fp| fp.polygon.perimeter())
+            .unwrap_or(0.0);
+
+        // Get rooms
+        let rooms = store.get_level_rooms(level_id);
+        let total_floor_area: f64 = rooms.iter().map(|r| r.area()).sum();
+
+        // Build room cost inputs
+        let room_inputs: Vec<RoomCostInput> = rooms
+            .iter()
+            .map(|room| {
+                let perimeter = room.boundary.perimeter();
+                let floor_sqft = room.area();
+                let wall_sqft = perimeter * level.floor_to_floor;
+                RoomCostInput {
+                    id: room.id,
+                    room_type: room.room_type.display_name().to_string(),
+                    floor_sqft,
+                    wall_sqft,
+                    perimeter_ft: perimeter,
+                }
+            })
+            .collect();
+
+        // Get walls and calculate wall areas
+        let walls = store.get_level_walls(level_id);
+        let mut exterior_wall_linear_ft = 0.0;
+        let mut interior_wall_linear_ft = 0.0;
+
+        for wall in &walls {
+            let wall_length = wall.length();
+            // For now, assume all walls are interior
+            // TODO: Determine exterior vs interior based on footprint boundary
+            interior_wall_linear_ft += wall_length;
+        }
+
+        // Use footprint perimeter as exterior wall estimate if no explicit exterior walls
+        if exterior_wall_linear_ft == 0.0 {
+            exterior_wall_linear_ft = exterior_perimeter;
+        }
+
+        let exterior_wall_sqft = exterior_wall_linear_ft * level.floor_to_floor;
+
+        // Build opening cost inputs
+        let mut opening_inputs: Vec<OpeningCostInput> = Vec::new();
+        let mut opening_counts: HashMap<String, (OpeningId, String, f64, f64, u32)> = HashMap::new();
+
+        for wall in &walls {
+            let openings = store.get_wall_openings(wall.id);
+            for opening in openings {
+                let opening_type = match &opening.opening_type {
+                    geometry_core::domain::OpeningType::Door => "exterior_door".to_string(),
+                    geometry_core::domain::OpeningType::Window => "window".to_string(),
+                    geometry_core::domain::OpeningType::Other(name) => {
+                        if name.to_lowercase().contains("interior") {
+                            "interior_door".to_string()
+                        } else if name.to_lowercase().contains("garage") {
+                            "garage_door".to_string()
+                        } else {
+                            "window".to_string()
+                        }
+                    }
+                };
+
+                // Group by type and dimensions for counting
+                let key = format!("{}_{}x{}", opening_type, opening.width as i32, opening.height as i32);
+                let entry = opening_counts.entry(key).or_insert((
+                    opening.id,
+                    opening_type,
+                    opening.width,
+                    opening.height,
+                    0,
+                ));
+                entry.4 += 1;
+            }
+        }
+
+        for (_, (id, opening_type, width, height, count)) in opening_counts {
+            opening_inputs.push(OpeningCostInput {
+                id,
+                opening_type,
+                width,
+                height,
+                count,
+            });
+        }
+
+        // Estimate roof area (simple multiplier for pitch)
+        let roof_sqft = footprint_sqft * 1.1; // 10% overhang/pitch factor
+
+        Ok(CostInput {
+            level_id,
+            footprint_sqft,
+            total_floor_area: if total_floor_area > 0.0 { total_floor_area } else { footprint_sqft },
+            exterior_wall_linear_ft,
+            exterior_wall_sqft,
+            interior_wall_linear_ft,
+            roof_sqft,
+            foundation_sqft: footprint_sqft,
+            rooms: room_inputs,
+            openings: opening_inputs,
+            wall_height: level.floor_to_floor,
+        })
+    }
+
+    /// Set a material price in the price table
+    /// material_type: string name of the MaterialType enum
+    /// unit: string name of the PricingUnit enum
+    /// price: the price value
+    #[wasm_bindgen]
+    pub fn set_material_price(
+        &self,
+        material_type: &str,
+        unit: &str,
+        price: f64,
+    ) -> Result<(), JsValue> {
+        let material = parse_material_type(material_type)?;
+        let pricing_unit = parse_pricing_unit(unit)?;
+
+        let unit_price = UnitPrice::new(material, pricing_unit, price);
+
+        self.cost_calculator
+            .borrow_mut()
+            .set_material_price(material, unit_price);
+
+        Ok(())
+    }
+
+    /// Set a labor rate in the price table
+    /// labor_type: string name of the LaborType enum
+    /// unit: string name of the PricingUnit enum
+    /// rate: the rate value
+    #[wasm_bindgen]
+    pub fn set_labor_rate(
+        &self,
+        labor_type: &str,
+        unit: &str,
+        rate: f64,
+    ) -> Result<(), JsValue> {
+        let labor = parse_labor_type(labor_type)?;
+        let pricing_unit = parse_pricing_unit(unit)?;
+
+        let labor_rate = LaborRate::new(labor, pricing_unit, rate);
+
+        self.cost_calculator
+            .borrow_mut()
+            .set_labor_rate(labor, labor_rate);
+
+        Ok(())
+    }
+
+    /// Get the current price table as JSON
+    #[wasm_bindgen]
+    pub fn get_price_table(&self) -> Result<JsValue, JsValue> {
+        let calculator = self.cost_calculator.borrow();
+        let price_table = calculator.price_table();
+
+        serde_wasm_bindgen::to_value(price_table)
+            .map_err(|e| JsValue::from_str(&format!("Failed to serialize price table: {}", e)))
+    }
+
+    /// Import a price table from JSON
+    /// Merges with existing prices (overwrites matching keys)
+    #[wasm_bindgen]
+    pub fn import_price_table(&self, table_json: &JsValue) -> Result<(), JsValue> {
+        let imported: PriceTable = serde_wasm_bindgen::from_value(table_json.clone())
+            .map_err(|e| JsValue::from_str(&format!("Failed to parse price table: {}", e)))?;
+
+        let mut calculator = self.cost_calculator.borrow_mut();
+
+        // Merge material prices
+        for (material, price) in imported.material_prices {
+            calculator.set_material_price(material, price);
+        }
+
+        // Merge labor rates
+        for (labor, rate) in imported.labor_rates {
+            calculator.set_labor_rate(labor, rate);
+        }
+
+        Ok(())
+    }
+
+    /// Get all material type names (for UI dropdown population)
+    #[wasm_bindgen]
+    pub fn get_material_types(&self) -> JsValue {
+        let types = vec![
+            "concrete_mix",
+            "concrete_rebar",
+            "concrete_forms",
+            "concrete_vapor_barrier",
+            "concrete_gravel",
+            "lumber_2x4",
+            "lumber_2x6",
+            "lumber_2x8",
+            "lumber_2x10",
+            "lumber_2x12",
+            "lvl_beam",
+            "sheathing",
+            "asphalt_shingles",
+            "metal_roofing",
+            "tile_roofing",
+            "roofing_underlayment",
+            "vinyl_siding",
+            "hardie_board",
+            "stucco",
+            "brick",
+            "stone",
+            "window_unit",
+            "exterior_door",
+            "interior_door",
+            "garage_door",
+            "drywall",
+            "insulation",
+            "paint",
+            "hardwood",
+            "tile",
+            "carpet",
+            "lvp",
+            "trim",
+            "truss",
+            "light_fixture",
+            "plumbing_fixture",
+            "cabinet",
+            "countertop",
+            "appliance",
+        ];
+
+        serde_wasm_bindgen::to_value(&types).unwrap_or(JsValue::NULL)
+    }
+
+    /// Get all labor type names (for UI dropdown population)
+    #[wasm_bindgen]
+    pub fn get_labor_types(&self) -> JsValue {
+        let types = vec![
+            "general_labor",
+            "skilled_labor",
+            "framing_carpentry",
+            "concrete_subgrade_prep",
+            "concrete_form_install",
+            "concrete_rebar_install",
+            "concrete_place_finish",
+            "roofing_install",
+            "siding_install",
+            "drywall_install",
+            "painting_labor",
+            "flooring_install",
+            "tile_install",
+            "plumbing_labor",
+            "electrical_labor",
+            "hvac_install",
+        ];
+
+        serde_wasm_bindgen::to_value(&types).unwrap_or(JsValue::NULL)
+    }
+
+    /// Get all pricing unit names (for UI dropdown population)
+    #[wasm_bindgen]
+    pub fn get_pricing_units(&self) -> JsValue {
+        let units = vec![
+            "per_component",
+            "per_square_foot",
+            "per_linear_foot",
+            "per_cubic_yard",
+            "per_pound",
+            "per_board",
+            "per_hour",
+            "lump",
+        ];
+
+        serde_wasm_bindgen::to_value(&units).unwrap_or(JsValue::NULL)
+    }
+}
+
+// ============================================================================
+// COSTING HELPER FUNCTIONS
+// ============================================================================
+
+/// Parse a MaterialType from a snake_case string
+fn parse_material_type(s: &str) -> Result<MaterialType, JsValue> {
+    match s.to_lowercase().as_str() {
+        "concrete_mix" => Ok(MaterialType::ConcreteMix),
+        "concrete_rebar" => Ok(MaterialType::ConcreteRebar),
+        "concrete_forms" => Ok(MaterialType::ConcreteForms),
+        "concrete_vapor_barrier" => Ok(MaterialType::ConcreteVaporBarrier),
+        "concrete_gravel" => Ok(MaterialType::ConcreteGravel),
+        "lumber_2x4" => Ok(MaterialType::Lumber2x4),
+        "lumber_2x6" => Ok(MaterialType::Lumber2x6),
+        "lumber_2x8" => Ok(MaterialType::Lumber2x8),
+        "lumber_2x10" => Ok(MaterialType::Lumber2x10),
+        "lumber_2x12" => Ok(MaterialType::Lumber2x12),
+        "lvl_beam" => Ok(MaterialType::LVLBeam),
+        "sheathing" => Ok(MaterialType::Sheathing),
+        "asphalt_shingles" => Ok(MaterialType::AsphaltShingles),
+        "metal_roofing" => Ok(MaterialType::MetalRoofing),
+        "tile_roofing" => Ok(MaterialType::TileRoofing),
+        "roofing_underlayment" => Ok(MaterialType::RoofingUnderlayment),
+        "vinyl_siding" => Ok(MaterialType::VinylSiding),
+        "hardie_board" => Ok(MaterialType::HardieBoard),
+        "stucco" => Ok(MaterialType::Stucco),
+        "brick" => Ok(MaterialType::Brick),
+        "stone" => Ok(MaterialType::Stone),
+        "window_unit" => Ok(MaterialType::WindowUnit),
+        "exterior_door" => Ok(MaterialType::ExteriorDoor),
+        "interior_door" => Ok(MaterialType::InteriorDoor),
+        "garage_door" => Ok(MaterialType::GarageDoor),
+        "drywall" => Ok(MaterialType::Drywall),
+        "insulation" => Ok(MaterialType::Insulation),
+        "paint" => Ok(MaterialType::Paint),
+        "hardwood" => Ok(MaterialType::Hardwood),
+        "tile" => Ok(MaterialType::Tile),
+        "carpet" => Ok(MaterialType::Carpet),
+        "lvp" => Ok(MaterialType::LVP),
+        "trim" => Ok(MaterialType::Trim),
+        "truss" => Ok(MaterialType::Truss),
+        "light_fixture" => Ok(MaterialType::LightFixture),
+        "plumbing_fixture" => Ok(MaterialType::PlumbingFixture),
+        "cabinet" => Ok(MaterialType::Cabinet),
+        "countertop" => Ok(MaterialType::Countertop),
+        "appliance" => Ok(MaterialType::Appliance),
+        _ => Err(JsValue::from_str(&format!("Unknown material type: {}", s))),
+    }
+}
+
+/// Parse a LaborType from a snake_case string
+fn parse_labor_type(s: &str) -> Result<LaborType, JsValue> {
+    match s.to_lowercase().as_str() {
+        "general_labor" => Ok(LaborType::GeneralLabor),
+        "skilled_labor" => Ok(LaborType::SkilledLabor),
+        "framing_carpentry" => Ok(LaborType::FramingCarpentry),
+        "concrete_subgrade_prep" => Ok(LaborType::ConcreteSubgradePrep),
+        "concrete_form_install" => Ok(LaborType::ConcreteFormInstall),
+        "concrete_rebar_install" => Ok(LaborType::ConcreteRebarInstall),
+        "concrete_place_finish" => Ok(LaborType::ConcretePlaceFinish),
+        "roofing_install" => Ok(LaborType::RoofingInstall),
+        "siding_install" => Ok(LaborType::SidingInstall),
+        "drywall_install" => Ok(LaborType::DrywallInstall),
+        "painting_labor" => Ok(LaborType::PaintingLabor),
+        "flooring_install" => Ok(LaborType::FlooringInstall),
+        "tile_install" => Ok(LaborType::TileInstall),
+        "plumbing_labor" => Ok(LaborType::PlumbingLabor),
+        "electrical_labor" => Ok(LaborType::ElectricalLabor),
+        "hvac_install" => Ok(LaborType::HVACInstall),
+        _ => Err(JsValue::from_str(&format!("Unknown labor type: {}", s))),
+    }
+}
+
+/// Parse a PricingUnit from a snake_case string
+fn parse_pricing_unit(s: &str) -> Result<PricingUnit, JsValue> {
+    match s.to_lowercase().as_str() {
+        "per_component" => Ok(PricingUnit::PerComponent),
+        "per_square_foot" => Ok(PricingUnit::PerSquareFoot),
+        "per_linear_foot" => Ok(PricingUnit::PerLinearFoot),
+        "per_cubic_yard" => Ok(PricingUnit::PerCubicYard),
+        "per_pound" => Ok(PricingUnit::PerPound),
+        "per_board" => Ok(PricingUnit::PerBoard),
+        "per_hour" => Ok(PricingUnit::PerHour),
+        "lump" => Ok(PricingUnit::Lump),
+        _ => Err(JsValue::from_str(&format!("Unknown pricing unit: {}", s))),
     }
 }
 

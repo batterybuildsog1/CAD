@@ -77,7 +77,7 @@ export interface Point2DObject {
 export type Polygon2D = Point2D[];
 
 // ============================================================================
-// Tool Names - 9 collaborative tools (5 room + 4 wall)
+// Tool Names - 13 collaborative tools (5 room + 4 wall + 4 cost)
 // ============================================================================
 
 export type ToolName =
@@ -89,7 +89,12 @@ export type ToolName =
   | 'create_wall'           // Create a wall segment between two points
   | 'auto_generate_walls'   // Auto-generate walls based on room types
   | 'set_room_openness'     // Set wall type between adjacent rooms
-  | 'generate_framing';     // Generate structural framing for walls
+  | 'generate_framing'      // Generate structural framing for walls
+  // Cost estimation tools
+  | 'generate_cost_estimate'  // Generate cost estimate for current level
+  | 'set_unit_price'          // Set material unit price
+  | 'set_labor_rate'          // Set labor rate
+  | 'get_cost_breakdown';     // Get detailed cost breakdown
 
 export interface ToolCall {
   name: ToolName;

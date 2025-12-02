@@ -10,6 +10,7 @@ pub mod room;
 pub mod opening;
 pub mod framing;
 pub mod error;
+pub mod costing;
 
 // Re-export commonly used types
 pub use ids::*;
@@ -28,3 +29,8 @@ pub use framing::{
     FramingMember, FramingLayout, RoughOpening, WallFramingConfig,
 };
 pub use error::{StructuredError, ErrorCode, EntityType};
+pub use costing::{
+    PricingUnit, CostCategory, LaborType, MaterialType,
+    UnitPrice, LaborRate, CostLineItem, CostEstimate, PriceTable,
+    CostLineItemId, CostEstimateId,
+};

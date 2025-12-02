@@ -111,6 +111,55 @@ export interface FramingRenderItem {
 }
 
 /**
+ * Cost estimate returned from WASM
+ */
+export interface CostEstimate {
+  id: string;
+  level_id: string;
+  line_items: CostLineItem[];
+  subtotals: Record<string, number>;
+  labor_total: number;
+  material_total: number;
+  grand_total: number;
+  created_at: string;
+  notes?: string;
+}
+
+export interface CostLineItem {
+  id: string;
+  category: string;
+  description: string;
+  material_type?: string;
+  labor_type?: string;
+  quantity: number;
+  unit: string;
+  unit_price: number;
+  total: number;
+  notes?: string;
+}
+
+export interface UnitPrice {
+  material_type: string;
+  unit: string;
+  price: number;
+  description?: string;
+  supplier?: string;
+  last_updated?: string;
+}
+
+export interface LaborRate {
+  labor_type: string;
+  unit: string;
+  rate: number;
+  description?: string;
+}
+
+export interface PriceTable {
+  material_prices: Record<string, UnitPrice>;
+  labor_rates: Record<string, LaborRate>;
+}
+
+/**
  * Extended WasmStore interface with rendering methods.
  */
 export interface WasmStoreExtended {
@@ -126,6 +175,15 @@ export interface WasmStoreExtended {
   get_level_walls?(level_id: string): string[];
   get_observable_state?(level_id: string): unknown;
   get_mutation_count?(): number;
+  // Cost estimation methods
+  generate_cost_estimate?(level_id: string): CostEstimate;
+  set_material_price?(material_type: string, unit: string, price: number): void;
+  set_labor_rate?(labor_type: string, unit: string, rate: number): void;
+  get_price_table?(): PriceTable;
+  import_price_table?(table: PriceTable): void;
+  get_material_types?(): string[];
+  get_labor_types?(): string[];
+  get_pricing_units?(): string[];
 }
 
 /**

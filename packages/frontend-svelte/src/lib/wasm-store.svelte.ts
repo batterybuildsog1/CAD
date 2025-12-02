@@ -4,6 +4,7 @@
  */
 
 import { getWasmStore, resetWasmStore, type WasmStore, type WasmStoreExtended } from './wasm-loader';
+import type { CostEstimate } from './cost-types';
 
 /**
  * Observable state derived from WASM - this is what Gemini sees
@@ -30,6 +31,7 @@ export interface ObservableState {
     width: number;
     depth: number;
   };
+  costEstimate?: CostEstimate;
 }
 
 export interface RoomSummary {
